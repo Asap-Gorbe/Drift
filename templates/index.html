@@ -1,9 +1,61 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>Flask Chat</title>
 </head>
 <body>
-<h1>Hello Flask</h1>
+
+<h2>Drift</h2>
+
+<!-- Username Section -->
+<input id="username" placeholder="Enter username">
+<button onclick="joinChat()">Join</button>
+
+<br><br>
+
+<!-- Message Section -->
+<input id="msg" placeholder="Enter message">
+<button onclick="sendMessage()">Send</button>
+
+<hr>
+
+<ul id="messages"></ul>
+
+<script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+
+<script>
+    const socket = io();
+    let joined = false;
+
+    function joinChat() {
+        const username = document.getElementById("username").value;
+        if (!username) return;
+
+        socket.emit("join", username);
+        joined = true;
+    }
+
+    function sendMessage() {
+        if (!joined) {
+            alert("Join first!");
+            return;
+        }
+
+        const msgInput = document.getElementById("msg");
+        const msg = msgInput.value;
+
+        if (!msg) return;
+
+        socket.send(msg);
+        msgInput.value = "";
+    }
+
+    socket.on("message", function(msg) {
+        const li = document.createElement("li");
+        li.innerText = msg;
+        document.getElementById("messages").appendChild(li);
+    });
+</script>
+
 </body>
 </html>
