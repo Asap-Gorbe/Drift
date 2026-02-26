@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Drift Login</title>
+</head>
+<body>
+    <h2>Register</h2>
+    <form id="registerForm">
+        <input type="text" name="username" placeholder="Username" required>
+        <input type="password" name="password" placeholder="Password" required>
+        <button type="submit">Register</button>
+    </form>
+
+    <h2>Login</h2>
+    <form id="loginForm">
+        <input type="text" name="username" placeholder="Username" required>
+        <input type="password" name="password" placeholder="Password" required>
+        <button type="submit">Login</button>
+    </form>
+
+    <script src="//code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+
+        $("#registerForm").submit(function(e) {
+            e.preventDefault();
+            const username = $(this).find('input[name="username"]').val();
+            const password = $(this).find('input[name="password"]').val();
+            $.post("/register", {username, password})
+             .done(res => alert(res))
+             .fail(err => alert(err.responseText));
+        });
+
+        $("#loginForm").submit(function(e) {
+            e.preventDefault();
+            const username = $(this).find('input[name="username"]').val();
+            const password = $(this).find('input[name="password"]').val();
+            $.post("/login", {username, password})
+             .done(res => {
+                 alert(res);
+                 // if login success, join the chat
+                 socket.emit("join", username);
+                 window.location.href = "/"; // go to chat page
+             })
+             .fail(err => alert(err.responseText));
+        });
+    </script>
+</body>
+</html>
