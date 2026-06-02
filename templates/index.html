@@ -1,55 +1,67 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Flask Chat</title>
+    <title>Drift</title>
 </head>
 <body>
 
 <h2>Drift</h2>
+<p>Logged in as: <strong>{{ username }}</strong> | <a href="/logout">Logout</a></p>
 
-<!-- Username Section -->
-<input id="username" placeholder="Enter username">
-<button onclick="joinChat()">Join</button>
-
-<br><br>
-
-<!-- Message Section -->
-<input id="msg" placeholder="Enter message">
-<button onclick="sendMessage()">Send</button>
+<!-- Room controls -->
+<div>
+    <span>Current room: <strong id="currentRoom">general</strong></span>
+    <br><br>
+    <input id="roomInput" placeholder="Room name">
+    <button onclick="switchRoom()">Switch / Join Room</button>
+    <input id="dmInput" placeholder="Username to DM">
+    <button onclick="startDM()">Message</button>
+</div>
 
 <hr>
 
+<!-- Messages -->
 <ul id="messages"></ul>
 
-<script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+<!-- Message input -->
+<input id="msg" placeholder="Enter message">
+<button onclick="sendMessage()">Send</button>
 
+<script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
 <script>
     const socket = io();
-    let joined = false;
 
-    function joinChat() {
-        const username = document.getElementById("username").value;
-        if (!username) return;
+    socket.emit("join");
 
-        socket.emit("join", username);
-        joined = true;
+    function switchRoom() {
+        const roomInput = document.getElementById("roomInput");
+        const room = roomInput.value.trim();
+        if (!room) return;
+
+        socket.emit("switch_room", room);
+        document.getElementById("currentRoom").innerText = room;
+        document.getElementById("messages").innerHTML = "";  // clear old room's messages
+        roomInput.value = "";
     }
 
     function sendMessage() {
-        if (!joined) {
-            alert("Join first!");
-            return;
-        }
-
         const msgInput = document.getElementById("msg");
         const msg = msgInput.value;
-
         if (!msg) return;
 
         socket.send(msg);
         msgInput.value = "";
     }
+    function startDM() {
+    const dmInput = document.getElementById("dmInput");
+    const target = dmInput.value.trim();
+    if (!target) return;
 
+    socket.emit("start_dm", target);
+    document.getElementById("currentRoom").innerText = "DM with " + target;
+    document.getElementById("messages").innerHTML = "";
+    dmInput.value = "";
+}
     socket.on("message", function(msg) {
         const li = document.createElement("li");
         li.innerText = msg;
