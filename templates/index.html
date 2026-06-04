@@ -10,9 +10,17 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<div class="app" data-username="{{ username }}">
+<div class="app" data-username="{{ username }}" data-initial-room="{{ initial_room }}">
     <aside class="sidebar">
         <div class="brand">Drift</div>
+
+        <div class="sidebar__section">
+            <label class="sidebar__label">Search</label>
+            <div class="field">
+                <input id="searchInput" placeholder="Find people or groups" autocomplete="off">
+            </div>
+            <ul id="search-results" class="room-list search-results" style="display:none;"></ul>
+        </div>
 
         <div class="sidebar__section">
             <label class="sidebar__label">Conversations</label>
@@ -20,29 +28,42 @@
         </div>
 
         <div class="sidebar__section">
-            <label class="sidebar__label">Switch room</label>
-            <div class="field">
-                <input id="roomInput" placeholder="Room name" autocomplete="off">
-                <button onclick="switchRoom()">Go</button>
-            </div>
-        </div>
-
-        <div class="sidebar__section">
-            <label class="sidebar__label">Direct message</label>
-            <div class="field">
-                <input id="dmInput" placeholder="Username" autocomplete="off">
-                <button onclick="startDM()">DM</button>
+            <button class="btn btn--ghost create-btn" onclick="toggleCreate()">+ Create group</button>
+            <div id="createPanel" class="create-panel" style="display:none;">
+                <input id="groupName" placeholder="Group name" autocomplete="off">
+                <div class="seg" id="visToggle">
+                    <button type="button" class="seg__btn is-active" data-private="false" onclick="setVisibility(this)">Public</button>
+                    <button type="button" class="seg__btn" data-private="true" onclick="setVisibility(this)">Private</button>
+                </div>
+                <button class="btn btn--primary" onclick="submitGroup()">Create</button>
+                <div class="field" id="inviteWrap" style="margin-top:6px; display:none;">
+                    <input id="inviteLink" readonly>
+                    <button onclick="copyInvite()">Copy</button>
+                </div>
             </div>
         </div>
 
         <div class="sidebar__footer">
-            <span class="user"><span class="user__dot"></span>{{ username }}</span>
+            <form class="user" id="avatarForm" method="post" action="/upload_avatar" enctype="multipart/form-data">
+                <label class="avatar-upload" title="Change profile picture">
+                    {% if avatar %}
+                        <img src="{{ url_for('static', filename='avatars/' + avatar) }}" class="footer-avatar" alt="me">
+                    {% else %}
+                        <span class="footer-avatar footer-avatar--empty">+</span>
+                    {% endif %}
+                    <span class="avatar-upload__badge">✎</span>
+                    <input type="file" name="avatar" accept="image/*" hidden
+                           onchange="document.getElementById('avatarForm').submit()">
+                </label>
+                <span>{{ username }}</span>
+            </form>
             <a class="logout" href="/logout">Logout</a>
         </div>
     </aside>
 
     <main class="chat">
         <header class="chat__header">
+            <button class="menu-btn" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
             <span id="currentRoom"># general</span>
         </header>
         <ul class="messages" id="messages"></ul>
@@ -51,19 +72,31 @@
             <button onclick="sendMessage()">Send</button>
         </div>
     </main>
+
+    <div class="backdrop" id="backdrop" onclick="closeSidebar()"></div>
 </div>
 
 <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
 <script>
     const socket = io();
-    const CURRENT_USER = document.querySelector(".app").dataset.username;
+    const APP = document.querySelector(".app");
+    const CURRENT_USER = APP.dataset.username;
+    const INITIAL_ROOM = APP.dataset.initialRoom;
     let currentRoom = "general";
+    let avatars = {};   // username -> stored filename
 
-    // On (re)connect, join the default room and ask for our conversation list.
     socket.on("connect", () => {
         socket.emit("join");
         socket.emit("get_rooms");
+        socket.emit("get_avatars");
+        if (INITIAL_ROOM) {
+            socket.emit("switch_room", INITIAL_ROOM);
+            currentRoom = INITIAL_ROOM;
+            setRoomLabel("🔒 " + INITIAL_ROOM);
+        }
     });
+
+    socket.on("avatars", function (map) { avatars = map || {}; });
 
     // --- Conversation list (live) ---
     socket.on("room_list", function (rooms) {
@@ -71,11 +104,8 @@
         list.innerHTML = "";
         rooms.forEach(room => {
             const isDM = room.name.startsWith("dm_");
-            // Prefer a server-provided display name (e.g. the other user's
-            // name for DMs) if it ever sends one; fall back to the raw name.
             const label = room.display || room.name;
             const prefix = isDM ? "DM · " : (room.is_private ? "🔒 " : "# ");
-
             const li = document.createElement("li");
             li.className = "room-list__item" + (room.name === currentRoom ? " is-active" : "");
             li.textContent = prefix + label;
@@ -84,35 +114,135 @@
         });
     });
 
-    // Shared "move into a room" logic used by both the list and the input.
     function goToRoom(room, label) {
         if (!room) return;
         socket.emit("switch_room", room);
         currentRoom = room;
         setRoomLabel(label || ("# " + room));
         clearMessages();
-        socket.emit("get_rooms"); // refresh sidebar (active highlight + new rooms)
+        socket.emit("get_rooms");
+        closeSidebar();
     }
 
-    function switchRoom() {
-        const input = document.getElementById("roomInput");
-        const room = input.value.trim();
-        if (!room) return;
-        goToRoom(room, "# " + room);
-        input.value = "";
-    }
-
-    function startDM() {
-        const input = document.getElementById("dmInput");
-        const target = input.value.trim();
+    function startDM(target) {
         if (!target) return;
         socket.emit("start_dm", target);
         setRoomLabel("DM · " + target);
         clearMessages();
         socket.emit("get_rooms");
-        input.value = "";
+        closeSidebar();
     }
 
+    // --- Search ---
+    const searchInput = document.getElementById("searchInput");
+    let searchTimer = null;
+    searchInput.addEventListener("input", () => {
+        const q = searchInput.value.trim();
+        clearTimeout(searchTimer);
+        if (!q) { hideSearch(); return; }
+        searchTimer = setTimeout(() => socket.emit("search", q), 150);
+    });
+
+    socket.on("search_results", function (data) {
+        const box = document.getElementById("search-results");
+        box.innerHTML = "";
+        const found = [];
+        (data.users || []).forEach(u => found.push({ label: "DM · " + u, go: () => startDM(u) }));
+        (data.groups || []).forEach(g => found.push({ label: "# " + g, go: () => goToRoom(g, "# " + g) }));
+
+        if (found.length === 0) {
+            const li = document.createElement("li");
+            li.className = "room-list__item";
+            li.style.cursor = "default";
+            li.textContent = "No matches";
+            box.appendChild(li);
+        } else {
+            found.forEach(item => {
+                const li = document.createElement("li");
+                li.className = "room-list__item";
+                li.textContent = item.label;
+                li.onclick = () => { item.go(); clearSearch(); };
+                box.appendChild(li);
+            });
+        }
+        box.style.display = "block";
+    });
+
+    function hideSearch() {
+        const box = document.getElementById("search-results");
+        box.innerHTML = "";
+        box.style.display = "none";
+    }
+    function clearSearch() {
+        searchInput.value = "";
+        hideSearch();
+    }
+
+    // --- Create group ---
+    let groupIsPrivate = false;
+
+    function toggleCreate() {
+        const panel = document.getElementById("createPanel");
+        panel.style.display = panel.style.display === "none" ? "flex" : "none";
+    }
+
+    function setVisibility(btn) {
+        document.querySelectorAll("#visToggle .seg__btn").forEach(b => b.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        groupIsPrivate = btn.dataset.private === "true";
+    }
+
+    function submitGroup() {
+        const name = document.getElementById("groupName").value.trim();
+        if (!name) return;
+        socket.emit("create_group", { name: name, is_private: groupIsPrivate });
+        document.getElementById("groupName").value = "";
+    }
+
+    socket.on("group_created", function (data) {
+        currentRoom = data.name;
+        setRoomLabel((data.is_private ? "🔒 " : "# ") + data.name);
+        clearMessages();
+        socket.emit("get_rooms");
+        const wrap = document.getElementById("inviteWrap");
+        if (data.is_private && data.token) {
+            document.getElementById("inviteLink").value = window.location.origin + "/join/" + data.token;
+            wrap.style.display = "flex";
+        } else {
+            wrap.style.display = "none";
+        }
+    });
+
+    function copyInvite() {
+        const field = document.getElementById("inviteLink");
+        field.select();
+        if (navigator.clipboard) navigator.clipboard.writeText(field.value);
+    }
+
+    // --- Avatars ---
+    function colorFor(str) {
+        let h = 0;
+        for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
+        return "hsl(" + (Math.abs(h) % 360) + " 55% 50%)";
+    }
+
+    function avatarEl(name) {
+        const file = avatars[name];
+        if (file) {
+            const img = document.createElement("img");
+            img.className = "msg-avatar";
+            img.src = "/static/avatars/" + file;
+            img.alt = name;
+            return img;
+        }
+        const div = document.createElement("div");
+        div.className = "msg-avatar msg-avatar--initial";
+        div.textContent = (name[0] || "?").toUpperCase();
+        div.style.background = colorFor(name);
+        return div;
+    }
+
+    // --- Messaging ---
     function sendMessage() {
         const input = document.getElementById("msg");
         if (!input.value.trim()) return;
@@ -122,27 +252,39 @@
 
     function setRoomLabel(text) { document.getElementById("currentRoom").textContent = text; }
     function clearMessages() { document.getElementById("messages").innerHTML = ""; }
+    function toggleSidebar() { document.querySelector(".app").classList.toggle("sidebar-open"); }
+    function closeSidebar() { document.querySelector(".app").classList.remove("sidebar-open"); }
 
     socket.on("message", function (text) {
         const messages = document.getElementById("messages");
-        const li = document.createElement("li");
         const match = text.match(/^\[(.+?)\]:\s([\s\S]*)$/);
         if (match) {
             const sender = match[1], content = match[2];
-            li.className = "message" + (sender === CURRENT_USER ? " message--own" : "");
+            const own = sender === CURRENT_USER;
+
+            const row = document.createElement("li");
+            row.className = "message-row" + (own ? " message-row--own" : "");
+
+            const bubble = document.createElement("div");
+            bubble.className = "message" + (own ? " message--own" : "");
             const s = document.createElement("span");
             s.className = "message__sender";
             s.textContent = sender;
             const c = document.createElement("span");
             c.className = "message__text";
             c.textContent = content;
-            li.appendChild(s);
-            li.appendChild(c);
+            bubble.appendChild(s);
+            bubble.appendChild(c);
+
+            row.appendChild(avatarEl(sender));
+            row.appendChild(bubble);
+            messages.appendChild(row);
         } else {
+            const li = document.createElement("li");
             li.className = "system";
             li.textContent = text;
+            messages.appendChild(li);
         }
-        messages.appendChild(li);
         messages.scrollTop = messages.scrollHeight;
     });
 
@@ -152,8 +294,7 @@
         });
     }
     onEnter("msg", sendMessage);
-    onEnter("roomInput", switchRoom);
-    onEnter("dmInput", startDM);
+    onEnter("groupName", submitGroup);
 </script>
 </body>
 </html>

@@ -3,7 +3,9 @@ from flask import Flask, render_template, request, redirect, url_for, session
 from flask_socketio import SocketIO, send, emit, join_room, leave_room
 import psycopg2
 import bcrypt
-
+import secrets
+import time
+from PIL import Image
 app = Flask(__name__)
 # Set SECRET_KEY in your environment for production; this fallback is dev-only.
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
@@ -14,7 +16,10 @@ DEFAULT_ROOM = "general"
 # In-memory map of live sockets -> who/where they are.
 # sid -> {"username", "user_id", "room", "room_id"}
 users = {}
-
+UPLOAD_FOLDER = os.path.join("static", "avatars")
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB cap
 
 # ---------- Database ----------
 
@@ -95,7 +100,38 @@ def get_username(user_id):
         cur.close()
         conn.close()
 
+def get_avatar(username):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT avatar FROM users WHERE username = %s;", (username,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        cur.close()
+        conn.close()
 
+
+def all_avatars():
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT username, avatar FROM users WHERE avatar IS NOT NULL;")
+        return {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def set_avatar(user_id, filename):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE users SET avatar = %s WHERE id = %s;", (filename, user_id))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 # ---------- Room helpers ----------
 
 def get_room_id(room_name):
@@ -205,7 +241,63 @@ def get_or_create_dm_room(id_a, id_b):
     finally:
         cur.close()
         conn.close()
+def find_room(name):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, is_private FROM rooms WHERE name = %s;", (name,))
+        return cur.fetchone()  # (id, is_private) or None
+    finally:
+        cur.close()
+        conn.close()
 
+
+def is_room_member(room_id, user_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s;",
+            (room_id, user_id),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_room_by_token(token):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, name FROM rooms WHERE invite_token = %s;", (token,))
+        return cur.fetchone()  # (id, name) or None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def create_private_room(name):
+    """Create a private room with an invite token. Returns (room_id, token) or
+    None if the name is already taken."""
+    token = secrets.token_urlsafe(16)
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
+        if cur.fetchone():
+            return None
+        cur.execute(
+            "INSERT INTO rooms (name, is_private, invite_token) "
+            "VALUES (%s, TRUE, %s) RETURNING id;",
+            (name, token),
+        )
+        room_id = cur.fetchone()[0]
+        conn.commit()
+        return room_id, token
+    finally:
+        cur.close()
+        conn.close()
 
 # ---------- Routes ----------
 
@@ -229,8 +321,10 @@ def login():
     if not login_user(username, password):
         return "Invalid credentials!", 401
     session["username"] = username
+    pending = session.pop("pending_join", None)
+    if pending:
+        return redirect(url_for("join_private", token=pending))
     return redirect(url_for("index"))
-
 
 @app.route("/login_page")
 def login_page():
@@ -244,12 +338,62 @@ def logout():
 
 
 @app.route("/")
+@app.route("/")
 def index():
     if "username" not in session:
         return redirect(url_for("login_page"))
-    return render_template("index.html", username=session["username"])
+    return render_template(
+        "index.html",
+        username=session["username"],
+        initial_room=request.args.get("room", ""),
+        avatar=get_avatar(session["username"]),
+    )
 
+@app.route("/join/<token>")
+def join_private(token):
+    if "username" not in session:
+        session["pending_join"] = token   # remember it across login
+        return redirect(url_for("login_page"))
+    room = get_room_by_token(token)
+    if not room:
+        return "Invalid or expired invite link.", 404
+    room_id, room_name = room
+    user_id = get_user_id(session["username"])
+    if user_id is not None:
+        add_room_member(room_id, user_id)
+    return redirect(url_for("index", room=room_name))
+@app.route("/upload_avatar", methods=["POST"])
+def upload_avatar():
+    if "username" not in session:
+        return redirect(url_for("login_page"))
+    file = request.files.get("avatar")
+    if not file or file.filename == "":
+        return redirect(url_for("index"))
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return "Unsupported image type.", 400
 
+    # Verify it's actually a valid image, not just a renamed file.
+    try:
+        Image.open(file.stream).verify()
+    except Exception:
+        return "That file isn't a valid image.", 400
+    file.stream.seek(0)  # verify() consumes the stream, so rewind before saving
+
+    user_id = get_user_id(session["username"])
+    old = get_avatar(session["username"])
+    filename = f"{user_id}_{int(time.time())}.{ext}"
+    file.save(os.path.join(UPLOAD_FOLDER, filename))
+    set_avatar(user_id, filename)
+
+    # Remove the previous avatar file so they don't accumulate.
+    if old and old != filename:
+        old_path = os.path.join(UPLOAD_FOLDER, old)
+        if os.path.exists(old_path):
+            os.remove(old_path)
+
+    socketio.emit("avatars", all_avatars())
+    return redirect(url_for("index"))
 # ---------- Socket helpers ----------
 
 def enter_room(sid, room_name):
@@ -294,6 +438,9 @@ def handle_join(data=None):
     }
     enter_room(request.sid, DEFAULT_ROOM)
 
+@socketio.on("get_avatars")
+def handle_get_avatars():
+    emit("avatars", all_avatars())
 
 @socketio.on("switch_room")
 def handle_switch_room(room_name):
@@ -302,8 +449,14 @@ def handle_switch_room(room_name):
     room_name = (room_name or "").strip()
     if not room_name:
         return
+    user_id = users[request.sid]["user_id"]
+    room = find_room(room_name)
+    if room:
+        room_id, is_private = room
+        if is_private and not is_room_member(room_id, user_id):
+            send("That's a private room — you need an invite link to join.", to=request.sid)
+            return
     enter_room(request.sid, room_name)
-
 
 @socketio.on("get_rooms")
 def handle_get_rooms():
@@ -379,6 +532,85 @@ def handle_disconnect():
     leave_room(info["room"])
     send(f"{info['username']} left {info['room']}", to=info["room"])
 
+@socketio.on("search")
+def handle_search(query):
+    if request.sid not in users:
+        return
+    query = (query or "").strip()
+    if not query:
+        emit("search_results", {"users": [], "groups": []})
+        return
+
+    me = users[request.sid]["username"]
+    pattern = f"%{query}%"
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT username FROM users "
+            "WHERE username ILIKE %s AND username <> %s "
+            "ORDER BY username LIMIT 8;",
+            (pattern, me),
+        )
+        users_found = [r[0] for r in cur.fetchall()]
+
+        cur.execute(
+            "SELECT name FROM rooms "
+            "WHERE is_private = FALSE AND name ILIKE %s AND LEFT(name, 3) <> 'dm_' "
+            "ORDER BY name LIMIT 8;",
+            (pattern,),
+        )
+        groups_found = [r[0] for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    emit("search_results", {"users": users_found, "groups": groups_found})
+
+def create_group(name, is_private):
+    """Create a group. Private groups get an invite token; public ones don't.
+    Returns (room_id, token) or None if the name is taken."""
+    token = secrets.token_urlsafe(16) if is_private else None
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
+        if cur.fetchone():
+            return None
+        cur.execute(
+            "INSERT INTO rooms (name, is_private, invite_token) "
+            "VALUES (%s, %s, %s) RETURNING id;",
+            (name, is_private, token),
+        )
+        room_id = cur.fetchone()[0]
+        conn.commit()
+        return room_id, token
+    finally:
+        cur.close()
+        conn.close()
+
+@socketio.on("create_group")
+def handle_create_group(data):
+    if request.sid not in users:
+        return
+    data = data or {}
+    name = (data.get("name") or "").strip()
+    is_private = bool(data.get("is_private"))
+    if not name:
+        return
+    if len(name) > 50:
+        send("Room name too long (max 50 characters).", to=request.sid)
+        return
+
+    result = create_group(name, is_private)
+    if result is None:
+        send("A room with that name already exists — pick another.", to=request.sid)
+        return
+
+    room_id, token = result
+    add_room_member(room_id, users[request.sid]["user_id"])
+    enter_room(request.sid, name)
+    emit("group_created", {"name": name, "is_private": is_private, "token": token})
 
 if __name__ == "__main__":
     print("Starting app")
