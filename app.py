@@ -1,160 +1,247 @@
 import os
 from flask import Flask, render_template, request, redirect, url_for, session
-import bcrypt
+from flask_socketio import SocketIO, send, emit, join_room, leave_room
 import psycopg2
-from flask_socketio import SocketIO, send, join_room, leave_room
-from psycopg2 import pool
-from contextlib import contextmanager
-from functools import wraps
+import bcrypt
 
-def safe_handler(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            print(f"Error in {fn.__name__}: {e}")
-            send("Something went wrong on the server.", to=request.sid)
-    return wrapper
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24))
+# Set SECRET_KEY in your environment for production; this fallback is dev-only.
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 socketio = SocketIO(app, async_mode="eventlet")
 
-users = {}  # { socket_sid: username }
-user_rooms = {}   # { sid: current_room_name }
 DEFAULT_ROOM = "general"
-db_pool = pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    host="localhost",
-    database="drift",
-    user="postgres",
-    password=os.environ.get("DB_PASSWORD", "8811awge")
-)
-USERNAME_MIN, USERNAME_MAX = 4, 30
-PASSWORD_MIN, PASSWORD_MAX = 6, 72   # bcrypt ignores anything past 72 bytes
-MESSAGE_MAX = 1000
 
-def validate_username(username):
-    if not username or not username.strip():
-        return "Username cannot be empty"
-    if not (USERNAME_MIN <= len(username) <= USERNAME_MAX):
-        return f"Username must be {USERNAME_MIN}-{USERNAME_MAX} characters"
-    return None
+# In-memory map of live sockets -> who/where they are.
+# sid -> {"username", "user_id", "room", "room_id"}
+users = {}
 
-def validate_password(password):
-    if not password:
-        return "Password cannot be empty"
-    if not (PASSWORD_MIN <= len(password) <= PASSWORD_MAX):
-        return f"Password must be {PASSWORD_MIN}-{PASSWORD_MAX} characters"
-    return None
 
-@contextmanager
-def get_cursor(commit=False):
-    conn = db_pool.getconn()
-    try:
-        cur = conn.cursor()
-        yield cur
-        if commit:
-            conn.commit()
-        cur.close()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        db_pool.putconn(conn)
+# ---------- Database ----------
+
+def get_connection():
+    # TODO: rotate this password and read it from DB_PASSWORD instead.
+    return psycopg2.connect(
+        host="localhost",
+        database="drift",
+        user="postgres",
+        password=os.environ.get("DB_PASSWORD", "8811awge"),
+    )
+
+
+# ---------- Password helpers ----------
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
+
 def check_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+# ---------- User helpers ----------
+
 def register_user(username, password):
-    with get_cursor(commit=True) as cur:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
         cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
         if cur.fetchone():
             return False
-        cur.execute("INSERT INTO users (username, password) VALUES (%s, %s);",
-                    (username, hash_password(password)))
+        cur.execute(
+            "INSERT INTO users (username, password) VALUES (%s, %s);",
+            (username, hash_password(password)),
+        )
+        conn.commit()
         return True
+    finally:
+        cur.close()
+        conn.close()
+
 
 def login_user(username, password):
-    with get_cursor() as cur:
-        cur.execute("SELECT id, password FROM users WHERE username = %s;", (username,))
-        result = cur.fetchone()
-    if not result:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT password FROM users WHERE username = %s;", (username,))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+    if not row:
         return False
-    user_id, hashed_pw = result
-    return check_password(password, hashed_pw)
+    return check_password(password, row[0])
+
 
 def get_user_id(username):
-    with get_cursor() as cur:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
         cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
-        result = cur.fetchone()
-    return result[0] if result else None
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        cur.close()
+        conn.close()
 
-def get_room_id(name):
-    with get_cursor() as cur:
-        cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
-        result = cur.fetchone()
-    return result[0] if result else None
 
-def get_room_history(room_name):
-    with get_cursor() as cur:
-        cur.execute("""
-            SELECT u.username, m.content
-            FROM messages m
-            JOIN users u ON m.user_id = u.id
-            JOIN rooms r ON m.room_id = r.id
-            WHERE r.name = %s
-            ORDER BY m.created_at ASC;
-        """, (room_name,))
+def get_username(user_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ---------- Room helpers ----------
+
+def get_room_id(room_name):
+    """Return the room's id, creating a (public) room if it doesn't exist."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM rooms WHERE name = %s;", (room_name,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute("INSERT INTO rooms (name) VALUES (%s) RETURNING id;", (room_name,))
+        room_id = cur.fetchone()[0]
+        conn.commit()
+        return room_id
+    finally:
+        cur.close()
+        conn.close()
+
+
+def add_room_member(room_id, user_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO room_members (room_id, user_id) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING;",
+            (room_id, user_id),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_room_history(room_id, limit=50):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT u.username, m.content "
+            "FROM messages m JOIN users u ON u.id = m.user_id "
+            "WHERE m.room_id = %s "
+            "ORDER BY m.created_at ASC "
+            "LIMIT %s;",
+            (room_id, limit),
+        )
         return cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_message(user_id, room_id, content):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO messages (user_id, room_id, content) VALUES (%s, %s, %s);",
+            (user_id, room_id, content),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def list_user_rooms(user_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT r.id, r.name, r.is_private "
+            "FROM rooms r "
+            "JOIN room_members rm ON rm.room_id = r.id "
+            "WHERE rm.user_id = %s "
+            "ORDER BY r.name;",
+            (user_id,),
+        )
+        return cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def dm_room_name(id_a, id_b):
+    return f"dm_{min(id_a, id_b)}_{max(id_a, id_b)}"
+
 
 def get_or_create_dm_room(id_a, id_b):
+    """Return (room_name, room_id) for the private 1:1 room between two users."""
     name = dm_room_name(id_a, id_b)
-    with get_cursor(commit=True) as cur:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
         cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
-        if not cur.fetchone():
-            cur.execute("INSERT INTO rooms (name) VALUES (%s);", (name,))
-    return name
+        row = cur.fetchone()
+        if row:
+            return name, row[0]
+        cur.execute(
+            "INSERT INTO rooms (name, is_private) VALUES (%s, TRUE) RETURNING id;",
+            (name,),
+        )
+        room_id = cur.fetchone()[0]
+        conn.commit()
+        return name, room_id
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ---------- Routes ----------
 
 @app.route("/register", methods=["POST"])
 def register():
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    error = validate_username(username) or validate_password(password)
-    if error:
-        return error, 400
-    try:
-        if not register_user(username, password):
-            return "Username already exists!", 400
-    except Exception as e:
-        print(f"Register error: {e}")
-        return "Something went wrong, please try again", 500
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    if not username or not password:
+        return "Username and password are required!", 400
+    if len(username) > 50:
+        return "Username too long (max 50 characters)!", 400
+    if not register_user(username, password):
+        return "Username already exists!", 400
     return redirect(url_for("login_page"))
+
+
 @app.route("/login", methods=["POST"])
 def login():
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    if not username or not password:
-        return "Username and password required", 400
-    try:
-        ok = login_user(username, password)
-    except Exception as e:
-        print(f"Login error: {e}")
-        return "Something went wrong, please try again", 500
-    if not ok:
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    if not login_user(username, password):
         return "Invalid credentials!", 401
     session["username"] = username
     return redirect(url_for("index"))
+
+
 @app.route("/login_page")
 def login_page():
     return render_template("login.html")
+
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login_page"))
+
 
 @app.route("/")
 def index():
@@ -162,130 +249,137 @@ def index():
         return redirect(url_for("login_page"))
     return render_template("index.html", username=session["username"])
 
+
+# ---------- Socket helpers ----------
+
+def enter_room(sid, room_name):
+    """Move a connected socket into a room: leave the old one, join the new one,
+    record membership, replay history, and announce the join."""
+    info = users.get(sid)
+    if not info:
+        return
+
+    old_room = info["room"]
+    if old_room and old_room != room_name:
+        leave_room(old_room)
+        send(f"{info['username']} left {old_room}", to=old_room)
+
+    room_id = get_room_id(room_name)
+    if info["user_id"] is not None:
+        add_room_member(room_id, info["user_id"])
+
+    info["room"] = room_name
+    info["room_id"] = room_id
+    join_room(room_name)
+
+    # Replay recent history to the joining socket only.
+    for hist_user, hist_msg in get_room_history(room_id):
+        send(f"[{hist_user}]: {hist_msg}", to=sid)
+
+    send(f"{info['username']} joined {room_name}", to=room_name)
+
+
+# ---------- Socket handlers ----------
+
 @socketio.on("join")
-@safe_handler
-def handle_join():
+def handle_join(data=None):
     if "username" not in session:
         return
     username = session["username"]
-    users[request.sid] = username
-    switch_to_room(DEFAULT_ROOM)
+    users[request.sid] = {
+        "username": username,
+        "user_id": get_user_id(username),
+        "room": None,
+        "room_id": None,
+    }
+    enter_room(request.sid, DEFAULT_ROOM)
+
 
 @socketio.on("switch_room")
-@safe_handler
 def handle_switch_room(room_name):
-    if not room_name or not room_name.strip():
+    if request.sid not in users:
         return
-    switch_to_room(room_name.strip())
-
-def switch_to_room(room_name):
-    username = users.get(request.sid)
-    if not username:
+    room_name = (room_name or "").strip()
+    if not room_name:
         return
-    old_room = user_rooms.get(request.sid)
-    if old_room:
-        leave_room(old_room)
-        send(f"{username} left", to=old_room)
-    join_room(room_name)
-    user_rooms[request.sid] = room_name
-    history = get_room_history(room_name)
-    for sender, content in history:
-        send(f"[{sender}]: {content}", to=request.sid)
-    send(f"{username} joined #{room_name}", to=room_name)
+    enter_room(request.sid, room_name)
 
-@socketio.on("message")
-@safe_handler
-def handle_message(msg):
-    if not msg or not msg.strip():
-        return
-    if len(msg) > MESSAGE_MAX:
-        send(f"Message too long (max {MESSAGE_MAX} characters)", to=request.sid)
-        return
-    msg = msg.strip()
-    username = users.get(request.sid, "Unknown")
-    room_name = user_rooms.get(request.sid, DEFAULT_ROOM)
-    user_id = get_user_id(username)
-    room_id = get_room_id(room_name)
-    if user_id and room_id:
-        with get_cursor(commit=True) as cur:
-            cur.execute("INSERT INTO messages (user_id, content, room_id) VALUES (%s, %s, %s);",
-                        (user_id, msg, room_id))
-    send(f"[{username}]: {msg}", to=room_name)
-@socketio.on("disconnect")
-@safe_handler
-def handle_disconnect():
-    username = users.pop(request.sid, "Unknown")
-    room_name = user_rooms.pop(request.sid, None)
-    print(f"{username} disconnected")
-    if room_name:
-        send(f"{username} left the chat", to=room_name)
-def dm_room_name(id_a, id_b):
-    return f"dm_{min(id_a, id_b)}_{max(id_a, id_b)}"
 
-def register_user(username, password):
-    with get_cursor(commit=True) as cur:
-        cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
-        if cur.fetchone():
-            return False
-        cur.execute("INSERT INTO users (username, password) VALUES (%s, %s);",
-                    (username, hash_password(password)))
-        return True
-
-def login_user(username, password):
-    with get_cursor() as cur:
-        cur.execute("SELECT id, password FROM users WHERE username = %s;", (username,))
-        result = cur.fetchone()
-    if not result:
-        return False
-    user_id, hashed_pw = result
-    return check_password(password, hashed_pw)
-
-def get_user_id(username):
-    with get_cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
-        result = cur.fetchone()
-    return result[0] if result else None
-
-def get_room_id(name):
-    with get_cursor() as cur:
-        cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
-        result = cur.fetchone()
-    return result[0] if result else None
-
-def get_room_history(room_name):
-    with get_cursor() as cur:
-        cur.execute("""
-            SELECT u.username, m.content
-            FROM messages m
-            JOIN users u ON m.user_id = u.id
-            JOIN rooms r ON m.room_id = r.id
-            WHERE r.name = %s
-            ORDER BY m.created_at ASC;
-        """, (room_name,))
-        return cur.fetchall()
-
-def get_or_create_dm_room(id_a, id_b):
-    name = dm_room_name(id_a, id_b)
-    with get_cursor(commit=True) as cur:
-        cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
-        if not cur.fetchone():
-            cur.execute("INSERT INTO rooms (name) VALUES (%s);", (name,))
-    return name
-@socketio.on("start_dm")
-@safe_handler
-def handle_start_dm(target_username):
+@socketio.on("get_rooms")
+def handle_get_rooms():
     if "username" not in session:
         return
-    my_id = get_user_id(session["username"])
+    user_id = get_user_id(session["username"])
+    if user_id is None:
+        return
+
+    payload = []
+    for room_id, name, is_private in list_user_rooms(user_id):
+        entry = {"id": room_id, "name": name, "is_private": is_private}
+        # For DM rooms (dm_<a>_<b>), show the *other* person's name.
+        if name.startswith("dm_"):
+            try:
+                _, a, b = name.split("_")
+                other_id = int(b) if int(a) == user_id else int(a)
+                other_name = get_username(other_id)
+                if other_name:
+                    entry["display"] = other_name
+            except (ValueError, IndexError):
+                pass
+        payload.append(entry)
+    emit("room_list", payload)
+
+
+@socketio.on("start_dm")
+def handle_start_dm(target_username):
+    if request.sid not in users:
+        return
+    target_username = (target_username or "").strip()
+    if not target_username:
+        return
+
+    my_id = users[request.sid]["user_id"]
     target_id = get_user_id(target_username)
-    if not target_id:
+    if target_id is None:
         send("That user doesn't exist", to=request.sid)
         return
     if target_id == my_id:
         send("You can't DM yourself", to=request.sid)
         return
-    room = get_or_create_dm_room(my_id, target_id)
-    switch_to_room(room)
+
+    dm_name, room_id = get_or_create_dm_room(my_id, target_id)
+    # Both people are members so the DM shows up in each of their lists.
+    add_room_member(room_id, my_id)
+    add_room_member(room_id, target_id)
+    enter_room(request.sid, dm_name)
+
+
+@socketio.on("message")
+def handle_message(msg):
+    info = users.get(request.sid)
+    if not info:
+        return
+    msg = (msg or "").strip()
+    if not msg:
+        return
+    if len(msg) > 2000:
+        msg = msg[:2000]
+
+    if info["user_id"] is not None:
+        save_message(info["user_id"], info["room_id"], msg)
+
+    send(f"[{info['username']}]: {msg}", to=info["room"])
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    info = users.pop(request.sid, None)
+    if not info or not info["room"]:
+        return
+    leave_room(info["room"])
+    send(f"{info['username']} left {info['room']}", to=info["room"])
+
+
 if __name__ == "__main__":
     print("Starting app")
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)

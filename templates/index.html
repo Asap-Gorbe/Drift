@@ -15,6 +15,11 @@
         <div class="brand">Drift</div>
 
         <div class="sidebar__section">
+            <label class="sidebar__label">Conversations</label>
+            <ul id="room-list" class="room-list"></ul>
+        </div>
+
+        <div class="sidebar__section">
             <label class="sidebar__label">Switch room</label>
             <div class="field">
                 <input id="roomInput" placeholder="Room name" autocomplete="off">
@@ -51,16 +56,49 @@
 <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
 <script>
     const socket = io();
-const CURRENT_USER = document.querySelector(".app").dataset.username;
-    socket.emit("join");
+    const CURRENT_USER = document.querySelector(".app").dataset.username;
+    let currentRoom = "general";
+
+    // On (re)connect, join the default room and ask for our conversation list.
+    socket.on("connect", () => {
+        socket.emit("join");
+        socket.emit("get_rooms");
+    });
+
+    // --- Conversation list (live) ---
+    socket.on("room_list", function (rooms) {
+        const list = document.getElementById("room-list");
+        list.innerHTML = "";
+        rooms.forEach(room => {
+            const isDM = room.name.startsWith("dm_");
+            // Prefer a server-provided display name (e.g. the other user's
+            // name for DMs) if it ever sends one; fall back to the raw name.
+            const label = room.display || room.name;
+            const prefix = isDM ? "DM · " : (room.is_private ? "🔒 " : "# ");
+
+            const li = document.createElement("li");
+            li.className = "room-list__item" + (room.name === currentRoom ? " is-active" : "");
+            li.textContent = prefix + label;
+            li.onclick = () => goToRoom(room.name, prefix + label);
+            list.appendChild(li);
+        });
+    });
+
+    // Shared "move into a room" logic used by both the list and the input.
+    function goToRoom(room, label) {
+        if (!room) return;
+        socket.emit("switch_room", room);
+        currentRoom = room;
+        setRoomLabel(label || ("# " + room));
+        clearMessages();
+        socket.emit("get_rooms"); // refresh sidebar (active highlight + new rooms)
+    }
 
     function switchRoom() {
         const input = document.getElementById("roomInput");
         const room = input.value.trim();
         if (!room) return;
-        socket.emit("switch_room", room);
-        setRoomLabel("# " + room);
-        clearMessages();
+        goToRoom(room, "# " + room);
         input.value = "";
     }
 
@@ -71,6 +109,7 @@ const CURRENT_USER = document.querySelector(".app").dataset.username;
         socket.emit("start_dm", target);
         setRoomLabel("DM · " + target);
         clearMessages();
+        socket.emit("get_rooms");
         input.value = "";
     }
 
@@ -84,7 +123,7 @@ const CURRENT_USER = document.querySelector(".app").dataset.username;
     function setRoomLabel(text) { document.getElementById("currentRoom").textContent = text; }
     function clearMessages() { document.getElementById("messages").innerHTML = ""; }
 
-    socket.on("message", function(text) {
+    socket.on("message", function (text) {
         const messages = document.getElementById("messages");
         const li = document.createElement("li");
         const match = text.match(/^\[(.+?)\]:\s([\s\S]*)$/);
