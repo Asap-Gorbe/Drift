@@ -1,9 +1,9 @@
-__version__ = "2.02"  # proper Python convention — readable by code, not just humans
+__version__ = "2.21"
 import logging
 import os
 from contextlib import contextmanager
 from dotenv import load_dotenv
-
+from flask import Flask, render_template, request, redirect, url_for, session , jsonify
 load_dotenv()
 
 from flask import Flask, render_template, request, redirect, url_for, session
@@ -15,6 +15,7 @@ from psycopg2 import pool as pg_pool
 import bcrypt
 import secrets
 import time
+from datetime import datetime
 from markupsafe import escape  # XSS: escapes <, >, &, " in user content
 from PIL import Image
 
@@ -47,7 +48,8 @@ UPLOAD_FOLDER = os.path.join("static", "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB cap
-
+GROUP_UPLOAD_FOLDER = os.path.join("static", "groups")
+os.makedirs(GROUP_UPLOAD_FOLDER, exist_ok=True)
 # ---------- Database ----------
 
 # --- Connection pool ---
@@ -206,7 +208,7 @@ def get_room_history(room_id, limit=50):
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT u.username, m.content "
+                "SELECT u.username, m.content, m.created_at "
                 "FROM messages m JOIN users u ON u.id = m.user_id "
                 "WHERE m.room_id = %s "
                 "ORDER BY m.created_at ASC "
@@ -236,7 +238,7 @@ def list_user_rooms(user_id):
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT r.id, r.name, r.is_private "
+                "SELECT r.id, r.name, r.is_private, r.photo "
                 "FROM rooms r "
                 "JOIN room_members rm ON rm.room_id = r.id "
                 "WHERE rm.user_id = %s "
@@ -326,8 +328,106 @@ def create_private_room(name):
             return room_id, token
         finally:
             cur.close()
+def save_uploaded_image(file, folder, prefix):
+    """Validate an uploaded image and save it under `folder` with a unique
+    name. Returns the filename, or None if no file was provided.
+    Raises ValueError if the file exists but isn't a usable image."""
+    if not file or file.filename == "":
+        return None
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise ValueError("Unsupported image type.")
+    try:
+        Image.open(file.stream).verify()  # confirm it's a real image, not a renamed file
+    except Exception:
+        raise ValueError("That file isn't a valid image.")
+    file.stream.seek(0)  # verify() consumes the stream, so rewind before saving
+    filename = f"{prefix}_{int(time.time())}.{ext}"
+    file.save(os.path.join(folder, filename))
+    return filename
+def is_owner(room_id, user_id):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT owner_id FROM rooms WHERE id = %s;", (room_id,))
+            row = cur.fetchone()
+            return bool(row) and row[0] == user_id
+        finally:
+            cur.close()
 
 
+def get_group(room_id):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT name, description, photo, is_private, owner_id, invite_token "
+                "FROM rooms WHERE id = %s;",
+                (room_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "name": row[0], "description": row[1], "photo": row[2],
+                "is_private": row[3], "owner_id": row[4], "invite_token": row[5],
+            }
+        finally:
+            cur.close()
+
+
+def update_group(room_id, name, description, is_private, photo=None):
+    """Update editable fields. photo=None keeps the existing photo. Manages the
+    invite token: private groups need one, public groups don't have a link."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT invite_token FROM rooms WHERE id = %s;", (room_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            token = (row[0] or secrets.token_urlsafe(16)) if is_private else None
+
+            if photo is None:
+                cur.execute(
+                    "UPDATE rooms SET name=%s, description=%s, is_private=%s, invite_token=%s "
+                    "WHERE id=%s;",
+                    (name, description, is_private, token, room_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE rooms SET name=%s, description=%s, is_private=%s, invite_token=%s, photo=%s "
+                    "WHERE id=%s;",
+                    (name, description, is_private, token, photo, room_id),
+                )
+            conn.commit()
+        finally:
+            cur.close()
+
+
+def regenerate_invite(room_id):
+    token = secrets.token_urlsafe(16)
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE rooms SET invite_token = %s WHERE id = %s;", (token, room_id))
+            conn.commit()
+            return token
+        finally:
+            cur.close()
+
+def delete_room_db(room_id):
+    """Delete a room and everything attached to it, children first so we don't
+    trip foreign keys."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("DELETE FROM messages WHERE room_id = %s;", (room_id,))
+            cur.execute("DELETE FROM room_members WHERE room_id = %s;", (room_id,))
+            cur.execute("DELETE FROM rooms WHERE id = %s;", (room_id,))
+            conn.commit()
+        finally:
+            cur.close()
 # ---------- Routes ----------
 
 @app.route("/register", methods=["POST"])
@@ -439,35 +539,193 @@ def upload_avatar():
 
     socketio.emit("avatars", all_avatars())
     return redirect(url_for("index"))
+@app.route("/create_group", methods=["POST"])
+@limiter.limit("10 per minute")
+def create_group_route():
+    if "username" not in session:
+        return jsonify({"error": "Not signed in."}), 401
 
+    name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip() or None
+    is_private = request.form.get("is_private") == "true"
+
+    if not name:
+        return jsonify({"error": "Group name is required."}), 400
+    if name.lower().startswith("dm_"):
+        return jsonify({"error": "Group names cannot start with 'dm_'."}), 400
+    if len(name) > 50:
+        return jsonify({"error": "Group name too long (max 50 characters)."}), 400
+
+    try:
+        photo = save_uploaded_image(request.files.get("photo"), GROUP_UPLOAD_FOLDER, "group")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    owner_id = get_user_id(session["username"])
+    result = create_group(name, is_private, owner_id, description, photo)
+    if result is None:
+        return jsonify({"error": "A room with that name already exists — pick another."}), 409
+
+    room_id, token = result
+    add_room_member(room_id, owner_id)
+
+    return jsonify({"name": name, "is_private": is_private, "token": token}), 201
+@app.route("/group/<room_name>")
+def group_details(room_name):
+    if "username" not in session:
+        return jsonify({"error": "Not signed in."}), 401
+    found = find_room(room_name)
+    if not found:
+        return jsonify({"error": "Group not found."}), 404
+    room_id, _ = found
+    user_id = get_user_id(session["username"])
+    if not is_room_member(room_id, user_id):
+        return jsonify({"error": "Not a member."}), 403
+
+    g = get_group(room_id)
+    return jsonify({
+        "name": g["name"],
+        "description": g["description"],
+        "photo": g["photo"],
+        "is_private": g["is_private"],
+        "is_owner": g["owner_id"] == user_id,
+        "invite_token": g["invite_token"] if g["is_private"] else None,
+    })
+
+@app.route("/room/<room_name>/delete", methods=["POST"])
+@limiter.limit("20 per minute")
+def delete_room(room_name):
+    if "username" not in session:
+        return jsonify({"error": "Not signed in."}), 401
+    found = find_room(room_name)
+    if not found:
+        return jsonify({"error": "Conversation not found."}), 404
+    room_id, _ = found
+    user_id = get_user_id(session["username"])
+
+    if room_name.startswith("dm_"):
+        # Either participant may delete a DM.
+        if not is_room_member(room_id, user_id):
+            return jsonify({"error": "You're not part of this conversation."}), 403
+    else:
+        # Only the owner may delete a group.
+        if not is_owner(room_id, user_id):
+            return jsonify({"error": "Only the group owner can delete it."}), 403
+
+    g = get_group(room_id)            # grab the photo filename before the row is gone
+    delete_room_db(room_id)
+    if g and g["photo"]:
+        p = os.path.join(GROUP_UPLOAD_FOLDER, g["photo"])
+        if os.path.exists(p):
+            os.remove(p)
+
+    # Tell everyone currently in the room that it's gone.
+    socketio.emit("room_deleted", {"name": room_name}, to=room_name)
+    return jsonify({"ok": True})
+@app.route("/group/<room_name>/edit", methods=["POST"])
+@limiter.limit("20 per minute")
+def group_edit(room_name):
+    if "username" not in session:
+        return jsonify({"error": "Not signed in."}), 401
+    found = find_room(room_name)
+    if not found:
+        return jsonify({"error": "Group not found."}), 404
+    room_id, _ = found
+    user_id = get_user_id(session["username"])
+    if not is_owner(room_id, user_id):
+        return jsonify({"error": "Only the group owner can edit it."}), 403
+
+    new_name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip() or None
+    is_private = request.form.get("is_private") == "true"
+
+    if not new_name:
+        return jsonify({"error": "Group name is required."}), 400
+    if new_name.lower().startswith("dm_"):
+        return jsonify({"error": "Group names cannot start with 'dm_'."}), 400
+    if len(new_name) > 50:
+        return jsonify({"error": "Group name too long (max 50 characters)."}), 400
+    if new_name != room_name and find_room(new_name):
+        return jsonify({"error": "That name is already taken."}), 409
+
+    old = get_group(room_id)
+    try:
+        photo = save_uploaded_image(request.files.get("photo"), GROUP_UPLOAD_FOLDER, "group")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    update_group(room_id, new_name, description, is_private, photo)
+
+    # Clean up the replaced photo file, if any.
+    if photo and old["photo"] and old["photo"] != photo:
+        old_path = os.path.join(GROUP_UPLOAD_FOLDER, old["photo"])
+        if os.path.exists(old_path):
+            os.remove(old_path)
+
+    # Tell people currently in the room to refresh (the name may have changed).
+    socketio.emit("group_updated", {"old_name": room_name, "new_name": new_name}, to=room_name)
+
+    g = get_group(room_id)
+    return jsonify({
+        "name": g["name"],
+        "is_private": g["is_private"],
+        "invite_token": g["invite_token"] if g["is_private"] else None,
+    })
+
+
+@app.route("/group/<room_name>/regenerate_link", methods=["POST"])
+@limiter.limit("10 per minute")
+def group_regenerate_link(room_name):
+    if "username" not in session:
+        return jsonify({"error": "Not signed in."}), 401
+    found = find_room(room_name)
+    if not found:
+        return jsonify({"error": "Group not found."}), 404
+    room_id, is_private = found
+    user_id = get_user_id(session["username"])
+    if not is_owner(room_id, user_id):
+        return jsonify({"error": "Only the group owner can change the link."}), 403
+    if not is_private:
+        return jsonify({"error": "Public groups don't have an invite link."}), 400
+    token = regenerate_invite(room_id)
+    return jsonify({"invite_token": token})
 
 # ---------- Socket helpers ----------
 
 def enter_room(sid, room_name):
-    """Move a connected socket into a room: leave the old one, join the new one,
-    record membership, replay history, and announce the join."""
+    """Set the socket's active room: ensure membership + subscription,
+    replay history, and announce only a genuinely new join."""
     info = users.get(sid)
     if not info:
         return
 
-    old_room = info["room"]
-    if old_room and old_room != room_name:
-        leave_room(old_room)
-        send(f"{info['username']} left {old_room}", to=old_room)
-
     room_id = get_room_id(room_name)
+
+    # Only announce the first real join, not every view-switch between rooms.
+    is_new_member = False
     if info["user_id"] is not None:
+        is_new_member = not is_room_member(room_id, info["user_id"])
         add_room_member(room_id, info["user_id"])
 
     info["room"] = room_name
     info["room_id"] = room_id
-    join_room(room_name)
+    join_room(room_name)  # idempotent; also covers brand-new rooms
 
-    # Replay recent history to the joining socket only.
-    for hist_user, hist_msg in get_room_history(room_id):
-        send(f"[{hist_user}]: {hist_msg}", to=sid)
+    # Tell the client which room is now active (authoritative — fixes DMs,
+    # whose room name the client doesn't know). Must come before history so
+    # currentRoom is set before those messages arrive.
+    emit("active_room", room_name, to=sid)
 
-    send(f"{info['username']} joined {room_name}", to=room_name)
+    for hist_user, hist_msg, hist_time in get_room_history(room_id):
+        emit("message", {
+            "sender": hist_user,
+            "text": hist_msg,
+            "time": hist_time.strftime("%H:%M") if hist_time else "",
+            "room": room_name,
+        }, to=sid)
+
+    if is_new_member:
+        send(f"{info['username']} joined {room_name}", to=room_name)
 
 
 # ---------- Socket handlers ----------
@@ -477,13 +735,18 @@ def handle_join(data=None):
     if "username" not in session:
         return
     username = session["username"]
+    user_id = get_user_id(username)
     users[request.sid] = {
         "username": username,
-        "user_id": get_user_id(username),
+        "user_id": user_id,
         "room": None,
         "room_id": None,
     }
-
+    # Stay subscribed to every conversation the user is in, so messages from
+    # rooms they aren't currently viewing still reach the browser.
+    if user_id is not None:
+        for _id, room_name, _priv, _photo in list_user_rooms(user_id):
+            join_room(room_name)
 
 @socketio.on("get_avatars")
 def handle_get_avatars():
@@ -516,8 +779,8 @@ def handle_get_rooms():
         return
 
     payload = []
-    for room_id, name, is_private in list_user_rooms(user_id):
-        entry = {"id": room_id, "name": name, "is_private": is_private}
+    for room_id, name, is_private, photo in list_user_rooms(user_id):
+        entry = {"id": room_id, "name": name, "is_private": is_private, "photo": photo}
         # For DM rooms (dm_<a>_<b>), show the *other* person's name.
         if name.startswith("dm_"):
             try:
@@ -571,8 +834,12 @@ def handle_message(msg):
     if info["user_id"] is not None:
         save_message(info["user_id"], info["room_id"], msg)
 
-    send(f"[{info['username']}]: {msg}", to=info["room"])
-
+    emit("message", {
+        "sender": info["username"],
+        "text": msg,
+        "time": datetime.now().strftime("%H:%M"),
+        "room": info["room"],
+    }, to=info["room"])
 
 @socketio.on("disconnect")
 def handle_disconnect():
@@ -618,7 +885,7 @@ def handle_search(query):
     emit("search_results", {"users": users_found, "groups": groups_found})
 
 
-def create_group(name, is_private):
+def create_group(name, is_private, owner_id=None, description=None, photo=None):
     """Create a group. Private groups get an invite token; public ones don't.
     Returns (room_id, token) or None if the name is taken."""
     token = secrets.token_urlsafe(16) if is_private else None
@@ -629,17 +896,15 @@ def create_group(name, is_private):
             if cur.fetchone():
                 return None
             cur.execute(
-                "INSERT INTO rooms (name, is_private, invite_token) "
-                "VALUES (%s, %s, %s) RETURNING id;",
-                (name, is_private, token),
+                "INSERT INTO rooms (name, is_private, invite_token, owner_id, description, photo) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                (name, is_private, token, owner_id, description, photo),
             )
             room_id = cur.fetchone()[0]
             conn.commit()
             return room_id, token
         finally:
             cur.close()
-
-
 @socketio.on("create_group")
 def handle_create_group(data):
     if request.sid not in users:

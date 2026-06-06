@@ -28,19 +28,7 @@
         </div>
 
         <div class="sidebar__section">
-            <button class="btn btn--ghost create-btn" onclick="toggleCreate()">+ Create group</button>
-            <div id="createPanel" class="create-panel" style="display:none;">
-                <input id="groupName" placeholder="Group name" autocomplete="off">
-                <div class="seg" id="visToggle">
-                    <button type="button" class="seg__btn is-active" data-private="false" onclick="setVisibility(this)">Public</button>
-                    <button type="button" class="seg__btn" data-private="true" onclick="setVisibility(this)">Private</button>
-                </div>
-                <button class="btn btn--primary" onclick="submitGroup()">Create</button>
-                <div class="field" id="inviteWrap" style="margin-top:6px; display:none;">
-                    <input id="inviteLink" readonly>
-                    <button onclick="copyInvite()">Copy</button>
-                </div>
-            </div>
+            <button class="btn btn--ghost create-btn" onclick="openCreate()">+ Create group</button>
         </div>
 
         <div class="sidebar__footer">
@@ -64,7 +52,8 @@
     <main class="chat">
         <header class="chat__header">
             <button class="menu-btn" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
-            <span id="currentRoom"></span>
+            <span id="currentRoom" class="chat__title" onclick="openGroupPanel()"></span>
+            <button class="header-action" id="deleteChatBtn" style="display:none;" onclick="deleteCurrentDM()" title="Delete chat">🗑</button>
         </header>
 
         <div class="empty-state" id="emptyState">
@@ -80,6 +69,77 @@
     </main>
 
     <div class="backdrop" id="backdrop" onclick="closeSidebar()"></div>
+
+    <div class="modal" id="createModal" style="display:none;">
+        <div class="modal__card">
+            <div class="modal__header">
+                <span>New group</span>
+                <button class="modal__close" onclick="closeCreate()" aria-label="Close">×</button>
+            </div>
+
+            <div class="modal__body" id="createForm">
+                <label class="group-photo-pick" title="Add a group photo">
+                    <img id="groupPhotoPreview" class="group-photo-pick__img" style="display:none;" alt="">
+                    <span id="groupPhotoPlaceholder" class="group-photo-pick__placeholder">📷</span>
+                    <input type="file" id="groupPhoto" accept="image/*" hidden onchange="previewGroupPhoto(this)">
+                </label>
+
+                <input id="groupName" class="modal__input" placeholder="Group name" autocomplete="off" maxlength="50">
+                <textarea id="groupDesc" class="modal__input modal__textarea" placeholder="Description (optional)" rows="3"></textarea>
+
+                <div class="seg" id="visToggle">
+                    <button type="button" class="seg__btn is-active" data-private="false" onclick="setVisibility(this)">Public</button>
+                    <button type="button" class="seg__btn" data-private="true" onclick="setVisibility(this)">Private</button>
+                </div>
+
+                <div class="modal__error" id="createError" style="display:none;"></div>
+                <button class="btn btn--primary" id="createSubmit" onclick="submitGroup()">Create group</button>
+            </div>
+
+            <div class="modal__body" id="createDone" style="display:none;">
+                <p class="modal__done-text">Group created 🎉 — share this invite link:</p>
+                <div class="field">
+                    <input id="inviteLink" readonly>
+                    <button onclick="copyInvite()">Copy</button>
+                </div>
+                <button class="btn btn--primary" onclick="closeCreate()">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="groupModal" style="display:none;">
+        <div class="modal__card">
+            <div class="modal__header">
+                <span id="groupModalTitle">Group info</span>
+                <button class="modal__close" onclick="closeGroupModal()" aria-label="Close">×</button>
+            </div>
+            <div class="modal__body">
+                <label class="group-photo-pick" id="gPhotoPick" title="Change photo">
+                    <img id="gPhotoPreview" class="group-photo-pick__img" style="display:none;" alt="">
+                    <span id="gPhotoPlaceholder" class="group-photo-pick__placeholder">📷</span>
+                    <input type="file" id="gPhoto" accept="image/*" hidden onchange="previewGroupEditPhoto(this)">
+                </label>
+
+                <input id="gName" class="modal__input" placeholder="Group name" autocomplete="off" maxlength="50">
+                <textarea id="gDesc" class="modal__input modal__textarea" placeholder="Description" rows="3"></textarea>
+
+                <div class="seg" id="gVisToggle">
+                    <button type="button" class="seg__btn" data-private="false" onclick="setGroupVisibility(this)">Public</button>
+                    <button type="button" class="seg__btn" data-private="true" onclick="setGroupVisibility(this)">Private</button>
+                </div>
+
+                <div class="field" id="gLinkWrap" style="display:none;">
+                    <input id="gLink" readonly>
+                    <button onclick="copyGroupLink()">Copy</button>
+                </div>
+                <button class="btn btn--ghost" id="gRegenerate" style="display:none;" onclick="regenerateLink()">Regenerate link</button>
+
+                <div class="modal__error" id="gError" style="display:none;"></div>
+                <button class="btn btn--primary" id="gSave" onclick="saveGroup()">Save changes</button>
+                <button class="btn btn--danger" id="gDelete" style="display:none;" onclick="deleteCurrentGroup()">Delete group</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
@@ -90,6 +150,10 @@
     const INITIAL_ROOM = APP.dataset.initialRoom;
     let currentRoom = null;
     let avatars = {};   // username -> stored filename
+    let unread = {};    // room name -> unread count
+    let groupModalName = null;
+    let groupEditPrivate = false;
+    let groupIsOwner = false;
 
     socket.on("connect", () => {
         socket.emit("join");
@@ -98,12 +162,15 @@
         if (INITIAL_ROOM) {
             socket.emit("switch_room", INITIAL_ROOM);
             currentRoom = INITIAL_ROOM;
-            setRoomLabel("🔒 " + INITIAL_ROOM);
+            setRoomLabel(INITIAL_ROOM);
             showChat();
         }
     });
 
-    socket.on("avatars", function (map) { avatars = map || {}; });
+    socket.on("avatars", function (map) {
+        avatars = map || {};
+        socket.emit("get_rooms");   // refresh sidebar so DM photos appear
+    });
 
     // --- Conversation list (live) ---
     socket.on("room_list", function (rooms) {
@@ -111,20 +178,58 @@
         list.innerHTML = "";
         rooms.forEach(room => {
             const isDM = room.name.startsWith("dm_");
-            const label = room.display || room.name;
-            const prefix = isDM ? "DM · " : (room.is_private ? "🔒 " : "# ");
+            const label = room.display || room.name;   // DM -> the other user's name
+            const display = (!isDM && room.is_private ? "🔒 " : "") + label;
+
             const li = document.createElement("li");
             li.className = "room-list__item" + (room.name === currentRoom ? " is-active" : "");
-            li.textContent = prefix + label;
-            li.onclick = () => goToRoom(room.name, prefix + label);
+            li.dataset.room = room.name;
+
+            // DM -> other user's avatar; group -> initial circle from its name.
+            const avatar = roomAvatarEl(room, label);
+            avatar.classList.add("room-list__avatar");
+            li.appendChild(avatar);
+
+            const name = document.createElement("span");
+            name.className = "room-list__name";
+            name.textContent = display;
+            li.appendChild(name);
+
+            const count = unread[room.name] || 0;
+            if (count > 0) {
+                const badge = document.createElement("span");
+                badge.className = "room-badge";
+                badge.textContent = count;
+                li.appendChild(badge);
+            }
+
+            li.onclick = () => goToRoom(room.name, display);
             list.appendChild(li);
         });
+    });
+
+    socket.on("active_room", function (room) {
+        currentRoom = room;
+        unread[room] = 0;     // opening a room clears its unread count
+        renderUnread();
+        updateHeaderActions();
+    });
+
+    socket.on("group_updated", function (data) {
+        if (currentRoom === data.old_name && data.old_name !== data.new_name) {
+            currentRoom = data.new_name;
+            setRoomLabel(data.new_name);   // sidebar refresh fixes the lock prefix
+            clearMessages();
+            socket.emit("switch_room", data.new_name);
+        }
+        socket.emit("get_rooms");
     });
 
     function goToRoom(room, label) {
         if (!room) return;
         socket.emit("switch_room", room);
         currentRoom = room;
+        unread[room] = 0;
         setRoomLabel(label || ("# " + room));
         clearMessages();
         showChat();
@@ -142,6 +247,67 @@
         closeSidebar();
     }
 
+    function renderUnread() {
+        document.querySelectorAll("#room-list .room-list__item").forEach(li => {
+            const room = li.dataset.room;
+            let badge = li.querySelector(".room-badge");
+            const count = unread[room] || 0;
+            if (count > 0) {
+                if (!badge) {
+                    badge = document.createElement("span");
+                    badge.className = "room-badge";
+                    li.appendChild(badge);
+                }
+                badge.textContent = count;
+            } else if (badge) {
+                badge.remove();
+            }
+        });
+    }
+function updateHeaderActions() {
+        // The header trash only applies to DMs (groups delete from their panel).
+        const btn = document.getElementById("deleteChatBtn");
+        btn.style.display = (currentRoom && currentRoom.startsWith("dm_")) ? "inline-flex" : "none";
+    }
+
+    function showEmptyState() {
+        APP.classList.remove("chat-active");
+        document.getElementById("messages").style.display = "none";
+        document.getElementById("composer").style.display = "none";
+        document.getElementById("emptyState").style.display = "flex";
+        currentRoom = null;
+        setRoomLabel("");
+        updateHeaderActions();
+    }
+
+    async function deleteRoom(name) {
+        try {
+            const res = await fetch("/room/" + encodeURIComponent(name) + "/delete", { method: "POST" });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || "Could not delete."); return; }
+            // The room_deleted event cleans up everyone's UI, including ours.
+        } catch (e) {
+            alert("Network error — please try again.");
+        }
+    }
+
+    async function deleteCurrentGroup() {
+        if (!confirm("Delete this group for everyone? This can't be undone.")) return;
+        await deleteRoom(groupModalName);
+        closeGroupModal();
+    }
+
+    async function deleteCurrentDM() {
+        if (!currentRoom) return;
+        if (!confirm("Delete this conversation? This removes it for both of you.")) return;
+        await deleteRoom(currentRoom);
+    }
+
+    socket.on("room_deleted", function (data) {
+        delete unread[data.name];
+        if (currentRoom === data.name) showEmptyState();
+        socket.emit("get_rooms");   // drop it from the sidebar
+    });
     // --- Search ---
     const searchInput = document.getElementById("searchInput");
     let searchTimer = null;
@@ -187,12 +353,24 @@
         hideSearch();
     }
 
-    // --- Create group ---
+    // --- Create group (modal) ---
     let groupIsPrivate = false;
 
-    function toggleCreate() {
-        const panel = document.getElementById("createPanel");
-        panel.style.display = panel.style.display === "none" ? "flex" : "none";
+    function openCreate() { resetCreate(); document.getElementById("createModal").style.display = "flex"; }
+    function closeCreate() { document.getElementById("createModal").style.display = "none"; }
+
+    function resetCreate() {
+        document.getElementById("createForm").style.display = "flex";
+        document.getElementById("createDone").style.display = "none";
+        document.getElementById("groupName").value = "";
+        document.getElementById("groupDesc").value = "";
+        document.getElementById("groupPhoto").value = "";
+        document.getElementById("groupPhotoPreview").style.display = "none";
+        document.getElementById("groupPhotoPlaceholder").style.display = "block";
+        document.getElementById("createError").style.display = "none";
+        document.querySelectorAll("#visToggle .seg__btn").forEach(b => b.classList.remove("is-active"));
+        document.querySelector('#visToggle .seg__btn[data-private="false"]').classList.add("is-active");
+        groupIsPrivate = false;
     }
 
     function setVisibility(btn) {
@@ -201,33 +379,197 @@
         groupIsPrivate = btn.dataset.private === "true";
     }
 
-    function submitGroup() {
-        const name = document.getElementById("groupName").value.trim();
-        if (!name) return;
-        socket.emit("create_group", { name: name, is_private: groupIsPrivate });
-        document.getElementById("groupName").value = "";
+    function previewGroupPhoto(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const img = document.getElementById("groupPhotoPreview");
+        img.src = URL.createObjectURL(file);
+        img.style.display = "block";
+        document.getElementById("groupPhotoPlaceholder").style.display = "none";
     }
 
-    socket.on("group_created", function (data) {
-        currentRoom = data.name;
-        setRoomLabel((data.is_private ? "🔒 " : "# ") + data.name);
-        clearMessages();
-        showChat();
-        socket.emit("get_rooms");
-        const wrap = document.getElementById("inviteWrap");
-        if (data.is_private && data.token) {
-            document.getElementById("inviteLink").value = window.location.origin + "/join/" + data.token;
-            wrap.style.display = "flex";
-        } else {
-            wrap.style.display = "none";
+    function showCreateError(msg) {
+        const e = document.getElementById("createError");
+        e.textContent = msg;
+        e.style.display = "block";
+    }
+
+    async function submitGroup() {
+        const name = document.getElementById("groupName").value.trim();
+        document.getElementById("createError").style.display = "none";
+        if (!name) { showCreateError("Group name is required."); return; }
+
+        const fd = new FormData();
+        fd.append("name", name);
+        fd.append("description", document.getElementById("groupDesc").value.trim());
+        fd.append("is_private", groupIsPrivate ? "true" : "false");
+        const photo = document.getElementById("groupPhoto").files[0];
+        if (photo) fd.append("photo", photo);
+
+        const btn = document.getElementById("createSubmit");
+        btn.disabled = true;
+        try {
+            const res = await fetch("/create_group", { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) { showCreateError(data.error || "Could not create group."); return; }
+
+            // Enter the new room: socket subscribes, replays history, sets it active.
+            goToRoom(data.name, (data.is_private ? "🔒 " : "") + data.name);
+
+            if (data.is_private && data.token) {
+                document.getElementById("createForm").style.display = "none";
+                document.getElementById("inviteLink").value = window.location.origin + "/join/" + data.token;
+                document.getElementById("createDone").style.display = "flex";
+            } else {
+                closeCreate();
+            }
+        } catch (e) {
+            showCreateError("Network error — please try again.");
+        } finally {
+            btn.disabled = false;
         }
-    });
+    }
 
     function copyInvite() {
         const field = document.getElementById("inviteLink");
         field.select();
         if (navigator.clipboard) navigator.clipboard.writeText(field.value);
     }
+
+    // --- Group details / edit panel ---
+    async function openGroupPanel() {
+        if (!currentRoom || currentRoom.startsWith("dm_")) return;   // groups only
+        try {
+            const res = await fetch("/group/" + encodeURIComponent(currentRoom));
+            const g = await res.json();
+            if (!res.ok) return;
+
+            groupModalName = currentRoom;
+            groupIsOwner = g.is_owner;
+            groupEditPrivate = g.is_private;
+
+            document.getElementById("gName").value = g.name;
+            document.getElementById("gDesc").value = g.description || "";
+
+            const img = document.getElementById("gPhotoPreview");
+            const ph = document.getElementById("gPhotoPlaceholder");
+            if (g.photo) {
+                img.src = "/static/groups/" + g.photo;
+                img.style.display = "block"; ph.style.display = "none";
+            } else {
+                img.style.display = "none"; ph.style.display = "block";
+            }
+            document.getElementById("gPhoto").value = "";
+
+            document.querySelectorAll("#gVisToggle .seg__btn").forEach(b => {
+                b.classList.toggle("is-active", (b.dataset.private === "true") === g.is_private);
+            });
+
+            const linkWrap = document.getElementById("gLinkWrap");
+            if (g.is_private && g.invite_token) {
+                document.getElementById("gLink").value = window.location.origin + "/join/" + g.invite_token;
+                linkWrap.style.display = "flex";
+            } else {
+                linkWrap.style.display = "none";
+            }
+
+            applyOwnerMode(g.is_owner);
+            document.getElementById("gError").style.display = "none";
+            document.getElementById("groupModal").style.display = "flex";
+        } catch (e) { /* ignore */ }
+    }
+
+    function applyOwnerMode(isOwner) {
+        document.getElementById("gName").readOnly = !isOwner;
+        document.getElementById("gDesc").readOnly = !isOwner;
+        document.querySelectorAll("#gVisToggle .seg__btn").forEach(b => b.disabled = !isOwner);
+        document.getElementById("gPhotoPick").style.pointerEvents = isOwner ? "auto" : "none";
+        document.getElementById("gSave").style.display = isOwner ? "block" : "none";
+        document.getElementById("gRegenerate").style.display = (isOwner && groupEditPrivate) ? "block" : "none";
+        document.getElementById("groupModalTitle").textContent = isOwner ? "Edit group" : "Group info";
+        document.getElementById("gDelete").style.display = isOwner ? "block" : "none";
+    }
+
+    function setGroupVisibility(btn) {
+        if (btn.disabled) return;
+        document.querySelectorAll("#gVisToggle .seg__btn").forEach(b => b.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        groupEditPrivate = btn.dataset.private === "true";
+        document.getElementById("gRegenerate").style.display = (groupIsOwner && groupEditPrivate) ? "block" : "none";
+    }
+
+    function previewGroupEditPhoto(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const img = document.getElementById("gPhotoPreview");
+        img.src = URL.createObjectURL(file);
+        img.style.display = "block";
+        document.getElementById("gPhotoPlaceholder").style.display = "none";
+    }
+
+    function showGroupError(msg) {
+        const e = document.getElementById("gError");
+        e.textContent = msg;
+        e.style.display = "block";
+    }
+
+    async function saveGroup() {
+        const name = document.getElementById("gName").value.trim();
+        document.getElementById("gError").style.display = "none";
+        if (!name) { showGroupError("Group name is required."); return; }
+
+        const fd = new FormData();
+        fd.append("name", name);
+        fd.append("description", document.getElementById("gDesc").value.trim());
+        fd.append("is_private", groupEditPrivate ? "true" : "false");
+        const photo = document.getElementById("gPhoto").files[0];
+        if (photo) fd.append("photo", photo);
+
+        const btn = document.getElementById("gSave");
+        btn.disabled = true;
+        try {
+            const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/edit",
+                                    { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) { showGroupError(data.error || "Could not save."); return; }
+
+            // If renamed, follow our own view to the new name (clear first to avoid
+            // history replaying on top of the old messages).
+            if (data.name !== groupModalName) {
+                currentRoom = data.name;
+                setRoomLabel((data.is_private ? "🔒 " : "") + data.name);
+                clearMessages();
+                socket.emit("switch_room", data.name);
+            }
+            socket.emit("get_rooms");
+            closeGroupModal();
+        } catch (e) {
+            showGroupError("Network error — please try again.");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function regenerateLink() {
+        try {
+            const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/regenerate_link",
+                                    { method: "POST" });
+            const data = await res.json();
+            if (!res.ok) { showGroupError(data.error || "Could not regenerate link."); return; }
+            document.getElementById("gLink").value = window.location.origin + "/join/" + data.invite_token;
+            document.getElementById("gLinkWrap").style.display = "flex";
+        } catch (e) {
+            showGroupError("Network error — please try again.");
+        }
+    }
+
+    function copyGroupLink() {
+        const field = document.getElementById("gLink");
+        field.select();
+        if (navigator.clipboard) navigator.clipboard.writeText(field.value);
+    }
+
+    function closeGroupModal() { document.getElementById("groupModal").style.display = "none"; }
 
     // --- Avatars ---
     function colorFor(str) {
@@ -251,7 +593,18 @@
         div.style.background = colorFor(name);
         return div;
     }
-
+    function roomAvatarEl(room, label) {
+        // A group with an uploaded photo shows that photo.
+        if (!room.name.startsWith("dm_") && room.photo) {
+            const img = document.createElement("img");
+            img.className = "msg-avatar";
+            img.src = "/static/groups/" + room.photo;
+            img.alt = label;
+            return img;
+        }
+        // DM -> other user's avatar; group without a photo -> initial circle.
+        return avatarEl(label);
+    }
     // --- Messaging ---
     function sendMessage() {
         const input = document.getElementById("msg");
@@ -273,36 +626,54 @@
         document.getElementById("composer").style.display = "flex";
     }
 
-    socket.on("message", function (text) {
+    socket.on("message", function (data) {
         const messages = document.getElementById("messages");
-        const match = text.match(/^\[(.+?)\]:\s([\s\S]*)$/);
-        if (match) {
-            const sender = match[1], content = match[2];
-            const own = sender === CURRENT_USER;
 
-            const row = document.createElement("li");
-            row.className = "message-row" + (own ? " message-row--own" : "");
-
-            const bubble = document.createElement("div");
-            bubble.className = "message" + (own ? " message--own" : "");
-            const s = document.createElement("span");
-            s.className = "message__sender";
-            s.textContent = sender;
-            const c = document.createElement("span");
-            c.className = "message__text";
-            c.textContent = content;
-            bubble.appendChild(s);
-            bubble.appendChild(c);
-
-            row.appendChild(avatarEl(sender));
-            row.appendChild(bubble);
-            messages.appendChild(row);
-        } else {
+        // System notices (joined) still arrive as plain strings.
+        if (typeof data === "string") {
             const li = document.createElement("li");
             li.className = "system";
-            li.textContent = text;
+            li.textContent = data;
             messages.appendChild(li);
+            messages.scrollTop = messages.scrollHeight;
+            return;
         }
+
+        // Message for a room you're NOT viewing: don't render, just count it.
+        if (data.room && data.room !== currentRoom) {
+            unread[data.room] = (unread[data.room] || 0) + 1;
+            renderUnread();
+            return;
+        }
+
+        // Otherwise it's the open room — render the bubble.
+        const own = data.sender === CURRENT_USER;
+
+        const row = document.createElement("li");
+        row.className = "message-row" + (own ? " message-row--own" : "");
+
+        const bubble = document.createElement("div");
+        bubble.className = "message" + (own ? " message--own" : "");
+
+        const s = document.createElement("span");
+        s.className = "message__sender";
+        s.textContent = data.sender;
+
+        const c = document.createElement("span");
+        c.className = "message__text";
+        c.textContent = data.text;
+
+        const t = document.createElement("span");
+        t.className = "message__time";
+        t.textContent = data.time;
+
+        bubble.appendChild(s);
+        bubble.appendChild(c);
+        bubble.appendChild(t);
+
+        row.appendChild(avatarEl(data.sender));
+        row.appendChild(bubble);
+        messages.appendChild(row);
         messages.scrollTop = messages.scrollHeight;
     });
 
