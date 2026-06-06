@@ -1,15 +1,42 @@
+__version__ = "2.02"  # proper Python convention — readable by code, not just humans
+import logging
 import os
+from contextlib import contextmanager
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from flask import Flask, render_template, request, redirect, url_for, session
 from flask_socketio import SocketIO, send, emit, join_room, leave_room
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import psycopg2
+from psycopg2 import pool as pg_pool
 import bcrypt
 import secrets
 import time
+from markupsafe import escape  # XSS: escapes <, >, &, " in user content
 from PIL import Image
+
+# --- Logging ---
+# Single place to control format and level for the whole app.
+# INFO shows normal activity; bump to DEBUG locally if needed.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# --- Startup validation ---
+# Crash immediately with a clear message instead of failing mid-request
+# when a required env var is missing.
+if not os.environ.get("DB_PASSWORD"):
+    raise RuntimeError("DB_PASSWORD environment variable is not set.")
+
 app = Flask(__name__)
-# Set SECRET_KEY in your environment for production; this fallback is dev-only.
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 socketio = SocketIO(app, async_mode="eventlet")
+limiter = Limiter(get_remote_address, app=app, default_limits=[])
 
 DEFAULT_ROOM = "general"
 
@@ -23,14 +50,27 @@ app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB cap
 
 # ---------- Database ----------
 
-def get_connection():
-    # TODO: rotate this password and read it from DB_PASSWORD instead.
-    return psycopg2.connect(
-        host="localhost",
-        database="drift",
-        user="postgres",
-        password=os.environ.get("DB_PASSWORD", "8811awge"),
-    )
+# --- Connection pool ---
+# Opens 2 connections at startup, grows to 10 under load.
+# Connections are borrowed and returned rather than opened/closed per query,
+# which avoids the overhead and connection limit issues of the old approach.
+_pool = pg_pool.ThreadedConnectionPool(
+    minconn=2,
+    maxconn=10,
+    host="localhost",
+    database="drift",
+    user="postgres",
+    password=os.environ["DB_PASSWORD"],
+)
+
+
+@contextmanager
+def get_db():
+    conn = _pool.getconn()
+    try:
+        yield conn
+    finally:
+        _pool.putconn(conn)
 
 
 # ---------- Password helpers ----------
@@ -46,175 +86,166 @@ def check_password(password: str, hashed: str) -> bool:
 # ---------- User helpers ----------
 
 def register_user(username, password):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
-        if cur.fetchone():
-            return False
-        cur.execute(
-            "INSERT INTO users (username, password) VALUES (%s, %s);",
-            (username, hash_password(password)),
-        )
-        conn.commit()
-        return True
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
+            if cur.fetchone():
+                return False
+            cur.execute(
+                "INSERT INTO users (username, password) VALUES (%s, %s);",
+                (username, hash_password(password)),
+            )
+            conn.commit()
+            return True
+        finally:
+            cur.close()
 
 
 def login_user(username, password):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT password FROM users WHERE username = %s;", (username,))
-        row = cur.fetchone()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT password FROM users WHERE username = %s;", (username,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
     if not row:
         return False
     return check_password(password, row[0])
 
 
 def get_user_id(username):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id FROM users WHERE username = %s;", (username,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            cur.close()
 
 
 def get_username(user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            cur.close()
+
 
 def get_avatar(username):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT avatar FROM users WHERE username = %s;", (username,))
-        row = cur.fetchone()
-        return row[0] if row and row[0] else None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT avatar FROM users WHERE username = %s;", (username,))
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+        finally:
+            cur.close()
 
 
 def all_avatars():
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT username, avatar FROM users WHERE avatar IS NOT NULL;")
-        return {r[0]: r[1] for r in cur.fetchall()}
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT username, avatar FROM users WHERE avatar IS NOT NULL;")
+            return {r[0]: r[1] for r in cur.fetchall()}
+        finally:
+            cur.close()
 
 
 def set_avatar(user_id, filename):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("UPDATE users SET avatar = %s WHERE id = %s;", (filename, user_id))
-        conn.commit()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE users SET avatar = %s WHERE id = %s;", (filename, user_id))
+            conn.commit()
+        finally:
+            cur.close()
+
+
 # ---------- Room helpers ----------
 
 def get_room_id(room_name):
     """Return the room's id, creating a (public) room if it doesn't exist."""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM rooms WHERE name = %s;", (room_name,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-        cur.execute("INSERT INTO rooms (name) VALUES (%s) RETURNING id;", (room_name,))
-        room_id = cur.fetchone()[0]
-        conn.commit()
-        return room_id
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id FROM rooms WHERE name = %s;", (room_name,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute("INSERT INTO rooms (name) VALUES (%s) RETURNING id;", (room_name,))
+            room_id = cur.fetchone()[0]
+            conn.commit()
+            return room_id
+        finally:
+            cur.close()
 
 
 def add_room_member(room_id, user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO room_members (room_id, user_id) VALUES (%s, %s) "
-            "ON CONFLICT DO NOTHING;",
-            (room_id, user_id),
-        )
-        conn.commit()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO room_members (room_id, user_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING;",
+                (room_id, user_id),
+            )
+            conn.commit()
+        finally:
+            cur.close()
 
 
 def get_room_history(room_id, limit=50):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT u.username, m.content "
-            "FROM messages m JOIN users u ON u.id = m.user_id "
-            "WHERE m.room_id = %s "
-            "ORDER BY m.created_at ASC "
-            "LIMIT %s;",
-            (room_id, limit),
-        )
-        return cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT u.username, m.content "
+                "FROM messages m JOIN users u ON u.id = m.user_id "
+                "WHERE m.room_id = %s "
+                "ORDER BY m.created_at ASC "
+                "LIMIT %s;",
+                (room_id, limit),
+            )
+            return cur.fetchall()
+        finally:
+            cur.close()
 
 
 def save_message(user_id, room_id, content):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO messages (user_id, room_id, content) VALUES (%s, %s, %s);",
-            (user_id, room_id, content),
-        )
-        conn.commit()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO messages (user_id, room_id, content) VALUES (%s, %s, %s);",
+                (user_id, room_id, content),
+            )
+            conn.commit()
+        finally:
+            cur.close()
 
 
 def list_user_rooms(user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT r.id, r.name, r.is_private "
-            "FROM rooms r "
-            "JOIN room_members rm ON rm.room_id = r.id "
-            "WHERE rm.user_id = %s "
-            "ORDER BY r.name;",
-            (user_id,),
-        )
-        return cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT r.id, r.name, r.is_private "
+                "FROM rooms r "
+                "JOIN room_members rm ON rm.room_id = r.id "
+                "WHERE rm.user_id = %s "
+                "ORDER BY r.name;",
+                (user_id,),
+            )
+            return cur.fetchall()
+        finally:
+            cur.close()
 
 
 def dm_room_name(id_a, id_b):
@@ -224,84 +255,83 @@ def dm_room_name(id_a, id_b):
 def get_or_create_dm_room(id_a, id_b):
     """Return (room_name, room_id) for the private 1:1 room between two users."""
     name = dm_room_name(id_a, id_b)
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
-        row = cur.fetchone()
-        if row:
-            return name, row[0]
-        cur.execute(
-            "INSERT INTO rooms (name, is_private) VALUES (%s, TRUE) RETURNING id;",
-            (name,),
-        )
-        room_id = cur.fetchone()[0]
-        conn.commit()
-        return name, room_id
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id FROM rooms WHERE name = %s;", (name,))
+            row = cur.fetchone()
+            if row:
+                return name, row[0]
+            cur.execute(
+                "INSERT INTO rooms (name, is_private) VALUES (%s, TRUE) RETURNING id;",
+                (name,),
+            )
+            room_id = cur.fetchone()[0]
+            conn.commit()
+            return name, room_id
+        finally:
+            cur.close()
+
+
 def find_room(name):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id, is_private FROM rooms WHERE name = %s;", (name,))
-        return cur.fetchone()  # (id, is_private) or None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, is_private FROM rooms WHERE name = %s;", (name,))
+            return cur.fetchone()  # (id, is_private) or None
+        finally:
+            cur.close()
 
 
 def is_room_member(room_id, user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s;",
-            (room_id, user_id),
-        )
-        return cur.fetchone() is not None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s;",
+                (room_id, user_id),
+            )
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
 
 
 def get_room_by_token(token):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id, name FROM rooms WHERE invite_token = %s;", (token,))
-        return cur.fetchone()  # (id, name) or None
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, name FROM rooms WHERE invite_token = %s;", (token,))
+            return cur.fetchone()  # (id, name) or None
+        finally:
+            cur.close()
 
 
 def create_private_room(name):
     """Create a private room with an invite token. Returns (room_id, token) or
     None if the name is already taken."""
     token = secrets.token_urlsafe(16)
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
-        if cur.fetchone():
-            return None
-        cur.execute(
-            "INSERT INTO rooms (name, is_private, invite_token) "
-            "VALUES (%s, TRUE, %s) RETURNING id;",
-            (name, token),
-        )
-        room_id = cur.fetchone()[0]
-        conn.commit()
-        return room_id, token
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
+            if cur.fetchone():
+                return None
+            cur.execute(
+                "INSERT INTO rooms (name, is_private, invite_token) "
+                "VALUES (%s, TRUE, %s) RETURNING id;",
+                (name, token),
+            )
+            room_id = cur.fetchone()[0]
+            conn.commit()
+            return room_id, token
+        finally:
+            cur.close()
+
 
 # ---------- Routes ----------
 
 @app.route("/register", methods=["POST"])
+@limiter.limit("5 per minute")
 def register():
     username = (request.form.get("username") or "").strip()
     if len(username) < 3:
@@ -324,8 +354,8 @@ def register():
                            notice="Account created — please sign in.", username=username)
 
 
-
 @app.route("/login", methods=["POST"])
+@limiter.limit("10 per minute")
 def login():
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
@@ -337,6 +367,8 @@ def login():
     if pending:
         return redirect(url_for("join_private", token=pending))
     return redirect(url_for("index"))
+
+
 @app.route("/login_page")
 def login_page():
     return render_template("login.html")
@@ -349,7 +381,6 @@ def logout():
 
 
 @app.route("/")
-@app.route("/")
 def index():
     if "username" not in session:
         return redirect(url_for("login_page"))
@@ -359,6 +390,7 @@ def index():
         initial_room=request.args.get("room", ""),
         avatar=get_avatar(session["username"]),
     )
+
 
 @app.route("/join/<token>")
 def join_private(token):
@@ -373,6 +405,8 @@ def join_private(token):
     if user_id is not None:
         add_room_member(room_id, user_id)
     return redirect(url_for("index", room=room_name))
+
+
 @app.route("/upload_avatar", methods=["POST"])
 def upload_avatar():
     if "username" not in session:
@@ -405,6 +439,8 @@ def upload_avatar():
 
     socketio.emit("avatars", all_avatars())
     return redirect(url_for("index"))
+
+
 # ---------- Socket helpers ----------
 
 def enter_room(sid, room_name):
@@ -448,9 +484,11 @@ def handle_join(data=None):
         "room_id": None,
     }
 
+
 @socketio.on("get_avatars")
 def handle_get_avatars():
     emit("avatars", all_avatars())
+
 
 @socketio.on("switch_room")
 def handle_switch_room(room_name):
@@ -467,6 +505,7 @@ def handle_switch_room(room_name):
             send("That's a private room — you need an invite link to join.", to=request.sid)
             return
     enter_room(request.sid, room_name)
+
 
 @socketio.on("get_rooms")
 def handle_get_rooms():
@@ -527,6 +566,7 @@ def handle_message(msg):
         return
     if len(msg) > 2000:
         msg = msg[:2000]
+    msg = str(escape(msg))  # XSS: neutralise <script>, HTML tags, etc. before save + broadcast
 
     if info["user_id"] is not None:
         save_message(info["user_id"], info["room_id"], msg)
@@ -542,6 +582,7 @@ def handle_disconnect():
     leave_room(info["room"])
     send(f"{info['username']} left {info['room']}", to=info["room"])
 
+
 @socketio.on("search")
 def handle_search(query):
     if request.sid not in users:
@@ -553,51 +594,51 @@ def handle_search(query):
 
     me = users[request.sid]["username"]
     pattern = f"%{query}%"
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT username FROM users "
-            "WHERE username ILIKE %s AND username <> %s "
-            "ORDER BY username LIMIT 8;",
-            (pattern, me),
-        )
-        users_found = [r[0] for r in cur.fetchall()]
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT username FROM users "
+                "WHERE username ILIKE %s AND username <> %s "
+                "ORDER BY username LIMIT 8;",
+                (pattern, me),
+            )
+            users_found = [r[0] for r in cur.fetchall()]
 
-        cur.execute(
-            "SELECT name FROM rooms "
-            "WHERE is_private = FALSE AND name ILIKE %s AND LEFT(name, 3) <> 'dm_' "
-            "ORDER BY name LIMIT 8;",
-            (pattern,),
-        )
-        groups_found = [r[0] for r in cur.fetchall()]
-    finally:
-        cur.close()
-        conn.close()
+            cur.execute(
+                "SELECT name FROM rooms "
+                "WHERE is_private = FALSE AND name ILIKE %s AND LEFT(name, 3) <> 'dm_' "
+                "ORDER BY name LIMIT 8;",
+                (pattern,),
+            )
+            groups_found = [r[0] for r in cur.fetchall()]
+        finally:
+            cur.close()
 
     emit("search_results", {"users": users_found, "groups": groups_found})
+
 
 def create_group(name, is_private):
     """Create a group. Private groups get an invite token; public ones don't.
     Returns (room_id, token) or None if the name is taken."""
     token = secrets.token_urlsafe(16) if is_private else None
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
-        if cur.fetchone():
-            return None
-        cur.execute(
-            "INSERT INTO rooms (name, is_private, invite_token) "
-            "VALUES (%s, %s, %s) RETURNING id;",
-            (name, is_private, token),
-        )
-        room_id = cur.fetchone()[0]
-        conn.commit()
-        return room_id, token
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT 1 FROM rooms WHERE name = %s;", (name,))
+            if cur.fetchone():
+                return None
+            cur.execute(
+                "INSERT INTO rooms (name, is_private, invite_token) "
+                "VALUES (%s, %s, %s) RETURNING id;",
+                (name, is_private, token),
+            )
+            room_id = cur.fetchone()[0]
+            conn.commit()
+            return room_id, token
+        finally:
+            cur.close()
+
 
 @socketio.on("create_group")
 def handle_create_group(data):
@@ -607,6 +648,9 @@ def handle_create_group(data):
     name = (data.get("name") or "").strip()
     is_private = bool(data.get("is_private"))
     if not name:
+        return
+    if name.lower().startswith("dm_"):
+        send("Room names cannot start with 'dm_'.", to=request.sid)
         return
     if len(name) > 50:
         send("Room name too long (max 50 characters).", to=request.sid)
@@ -622,6 +666,7 @@ def handle_create_group(data):
     enter_room(request.sid, name)
     emit("group_created", {"name": name, "is_private": is_private, "token": token})
 
+
 if __name__ == "__main__":
-    print("Starting app")
+    log.info("Starting Drift v%s", __version__)
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)

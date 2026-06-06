@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+static/avatars/*
+!static/avatars/.gitkeep
+.idea/
+*.egg-info/
+dist/
+.claude/
