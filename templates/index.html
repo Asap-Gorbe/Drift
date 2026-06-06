@@ -64,10 +64,16 @@
     <main class="chat">
         <header class="chat__header">
             <button class="menu-btn" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
-            <span id="currentRoom"># general</span>
+            <span id="currentRoom"></span>
         </header>
-        <ul class="messages" id="messages"></ul>
-        <div class="composer">
+
+        <div class="empty-state" id="emptyState">
+            <img src="{{ url_for('static', filename='bloommoon.jpeg') }}" alt="" class="empty-state__img">
+            <p class="empty-state__text">Please select a conversation to start drifting</p>
+        </div>
+
+        <ul class="messages" id="messages" style="display:none;"></ul>
+        <div class="composer" id="composer" style="display:none;">
             <input id="msg" placeholder="Type a message…" autocomplete="off">
             <button onclick="sendMessage()">Send</button>
         </div>
@@ -82,7 +88,7 @@
     const APP = document.querySelector(".app");
     const CURRENT_USER = APP.dataset.username;
     const INITIAL_ROOM = APP.dataset.initialRoom;
-    let currentRoom = "general";
+    let currentRoom = null;
     let avatars = {};   // username -> stored filename
 
     socket.on("connect", () => {
@@ -93,6 +99,7 @@
             socket.emit("switch_room", INITIAL_ROOM);
             currentRoom = INITIAL_ROOM;
             setRoomLabel("🔒 " + INITIAL_ROOM);
+            showChat();
         }
     });
 
@@ -120,6 +127,7 @@
         currentRoom = room;
         setRoomLabel(label || ("# " + room));
         clearMessages();
+        showChat();
         socket.emit("get_rooms");
         closeSidebar();
     }
@@ -129,6 +137,7 @@
         socket.emit("start_dm", target);
         setRoomLabel("DM · " + target);
         clearMessages();
+        showChat();
         socket.emit("get_rooms");
         closeSidebar();
     }
@@ -203,6 +212,7 @@
         currentRoom = data.name;
         setRoomLabel((data.is_private ? "🔒 " : "# ") + data.name);
         clearMessages();
+        showChat();
         socket.emit("get_rooms");
         const wrap = document.getElementById("inviteWrap");
         if (data.is_private && data.token) {
@@ -254,6 +264,14 @@
     function clearMessages() { document.getElementById("messages").innerHTML = ""; }
     function toggleSidebar() { document.querySelector(".app").classList.toggle("sidebar-open"); }
     function closeSidebar() { document.querySelector(".app").classList.remove("sidebar-open"); }
+
+    // Swap the empty state out for the live chat the first time a room is opened.
+    function showChat() {
+        APP.classList.add("chat-active");
+        document.getElementById("emptyState").style.display = "none";
+        document.getElementById("messages").style.display = "flex";
+        document.getElementById("composer").style.display = "flex";
+    }
 
     socket.on("message", function (text) {
         const messages = document.getElementById("messages");

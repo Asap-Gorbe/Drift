@@ -304,14 +304,25 @@ def create_private_room(name):
 @app.route("/register", methods=["POST"])
 def register():
     username = (request.form.get("username") or "").strip()
+    if len(username) < 3:
+        return render_template("login.html", mode="register",
+                               error="Username must be at least 3 characters.", username=username)
     password = request.form.get("password") or ""
     if not username or not password:
-        return "Username and password are required!", 400
-    if len(username) > 50:
-        return "Username too long (max 50 characters)!", 400
+        return render_template("login.html", mode="register",
+                               error="Username and password are required.", username=username)
+    if len(username) > 20:
+        return render_template("login.html", mode="register",
+                               error="Username too long (max 50 characters).", username=username)
+    if len(password) < 6:
+        return render_template("login.html", mode="register",
+                               error="Password must be at least 6 characters.", username=username)
     if not register_user(username, password):
-        return "Username already exists!", 400
-    return redirect(url_for("login_page"))
+        return render_template("login.html", mode="register",
+                               error="That username is already taken.", username=username)
+    return render_template("login.html", mode="login",
+                           notice="Account created — please sign in.", username=username)
+
 
 
 @app.route("/login", methods=["POST"])
@@ -319,13 +330,13 @@ def login():
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
     if not login_user(username, password):
-        return "Invalid credentials!", 401
+        return render_template("login.html", mode="login",
+                               error="Invalid username or password.", username=username)
     session["username"] = username
     pending = session.pop("pending_join", None)
     if pending:
         return redirect(url_for("join_private", token=pending))
     return redirect(url_for("index"))
-
 @app.route("/login_page")
 def login_page():
     return render_template("login.html")
@@ -436,7 +447,6 @@ def handle_join(data=None):
         "room": None,
         "room_id": None,
     }
-    enter_room(request.sid, DEFAULT_ROOM)
 
 @socketio.on("get_avatars")
 def handle_get_avatars():
@@ -510,7 +520,7 @@ def handle_start_dm(target_username):
 @socketio.on("message")
 def handle_message(msg):
     info = users.get(request.sid)
-    if not info:
+    if not info or not info["room"]:
         return
     msg = (msg or "").strip()
     if not msg:
