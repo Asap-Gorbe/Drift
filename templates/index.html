@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Drift</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,6 +34,7 @@
 
         <div class="sidebar__footer">
             <form class="user" id="avatarForm" method="post" action="/upload_avatar" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <label class="avatar-upload" title="Change profile picture">
                     {% if avatar %}
                         <img src="{{ url_for('static', filename='avatars/' + avatar) }}" class="footer-avatar" alt="me">
@@ -40,6 +42,7 @@
                         <span class="footer-avatar footer-avatar--empty">+</span>
                     {% endif %}
                     <span class="avatar-upload__badge">✎</span>
+                    <meta name="csrf-token" content="{{ csrf_token() }}">
                     <input type="file" name="avatar" accept="image/*" hidden
                            onchange="document.getElementById('avatarForm').submit()">
                 </label>
@@ -148,6 +151,7 @@
     const APP = document.querySelector(".app");
     const CURRENT_USER = APP.dataset.username;
     const INITIAL_ROOM = APP.dataset.initialRoom;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
     let currentRoom = null;
     let avatars = {};   // username -> stored filename
     let unread = {};    // room name -> unread count
@@ -279,10 +283,9 @@ function updateHeaderActions() {
         setRoomLabel("");
         updateHeaderActions();
     }
-
     async function deleteRoom(name) {
         try {
-            const res = await fetch("/room/" + encodeURIComponent(name) + "/delete", { method: "POST" });
+            const res = await fetch("/room/" + encodeURIComponent(name) + "/delete", { method: "POST", headers: { "X-CSRFToken": csrfToken } });
             const data = await res.json();
             if (!res.ok) { alert(data.error || "Could not delete."); return; }
             // The room_deleted event cleans up everyone's UI, including ours.
@@ -409,7 +412,7 @@ function updateHeaderActions() {
         const btn = document.getElementById("createSubmit");
         btn.disabled = true;
         try {
-            const res = await fetch("/create_group", { method: "POST", body: fd });
+            const res = await fetch("/create_group", { method: "POST", headers: { "X-CSRFToken": csrfToken }, body: fd });
             const data = await res.json();
             if (!res.ok) { showCreateError(data.error || "Could not create group."); return; }
 
@@ -429,6 +432,7 @@ function updateHeaderActions() {
             btn.disabled = false;
         }
     }
+
 
     function copyInvite() {
         const field = document.getElementById("inviteLink");
@@ -525,8 +529,7 @@ function updateHeaderActions() {
         const photo = document.getElementById("gPhoto").files[0];
         if (photo) fd.append("photo", photo);
 
-        const btn = document.getElementById("gSave");
-        btn.disabled = true;
+        const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/edit", { method: "POST", headers: { "X-CSRFToken": csrfToken }, body: fd });        btn.disabled = true;
         try {
             const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/edit",
                                     { method: "POST", body: fd });
@@ -552,8 +555,7 @@ function updateHeaderActions() {
 
     async function regenerateLink() {
         try {
-            const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/regenerate_link",
-                                    { method: "POST" });
+            const res = await fetch("/group/" + encodeURIComponent(groupModalName) + "/regenerate_link", { method: "POST", headers: { "X-CSRFToken": csrfToken } });
             const data = await res.json();
             if (!res.ok) { showGroupError(data.error || "Could not regenerate link."); return; }
             document.getElementById("gLink").value = window.location.origin + "/join/" + data.invite_token;

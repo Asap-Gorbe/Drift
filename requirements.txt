@@ -6,3 +6,4 @@ bcrypt
 eventlet
 python-dotenv
 pillow
+Flask-WTF
