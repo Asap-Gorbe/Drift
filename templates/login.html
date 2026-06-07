@@ -27,6 +27,7 @@
         <form class="auth__form" id="authForm" method="post"
               action="{{ '/register' if mode == 'register' else '/login' }}">
             <label class="auth__label" for="username">Username</label>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input id="username" name="username" value="{{ username|default('') }}"
                    placeholder="yourname" autocomplete="username" required>
 
