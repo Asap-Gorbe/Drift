@@ -1,12 +1,10 @@
-__version__ = "2.21"
+__version__ = "2.22"
 import logging
 import os
 from contextlib import contextmanager
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, redirect, url_for, session , jsonify
 load_dotenv()
-
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session , jsonify
 from flask_socketio import SocketIO, send, emit, join_room, leave_room
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -18,7 +16,7 @@ import time
 from datetime import datetime
 from markupsafe import escape  # XSS: escapes <, >, &, " in user content
 from PIL import Image
-
+from flask_wtf.csrf import CSRFProtect
 # --- Logging ---
 # Single place to control format and level for the whole app.
 # INFO shows normal activity; bump to DEBUG locally if needed.
@@ -33,9 +31,15 @@ log = logging.getLogger(__name__)
 # when a required env var is missing.
 if not os.environ.get("DB_PASSWORD"):
     raise RuntimeError("DB_PASSWORD environment variable is not set.")
-
+if not os.environ.get("SECRET_KEY"):
+    raise RuntimeError("SECRET_KEY environment variable is not set.")
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY")
+app.config["SESSION_COOKIE_HTTPONLY"] = True   # JS can't read the cookie (already Flask's default; explicit for clarity)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # cookie withheld on cross-site POSTs — the CSRF backstop
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "").lower() in ("1", "true", "yes", "on")
+app.config["WTF_CSRF_TIME_LIMIT"] = None   # token lives as long as the session — your chat page stays open for hours
+csrf = CSRFProtect(app)
 socketio = SocketIO(app, async_mode="eventlet")
 limiter = Limiter(get_remote_address, app=app, default_limits=[])
 
@@ -934,4 +938,5 @@ def handle_create_group(data):
 
 if __name__ == "__main__":
     log.info("Starting Drift v%s", __version__)
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes", "on")
+    socketio.run(app, host="0.0.0.0", port=5000, debug=debug)
