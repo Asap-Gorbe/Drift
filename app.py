@@ -91,7 +91,7 @@ def check_password(password: str, hashed: str) -> bool:
 
 # ---------- User helpers ----------
 
-def register_user(username, password):
+def register_user(username, password, question, answer):
     with get_db() as conn:
         cur = conn.cursor()
         try:
@@ -99,14 +99,15 @@ def register_user(username, password):
             if cur.fetchone():
                 return False
             cur.execute(
-                "INSERT INTO users (username, password) VALUES (%s, %s);",
-                (username, hash_password(password)),
+                "INSERT INTO users (username, password, security_question, security_answer) "
+                "VALUES (%s, %s, %s, %s);",
+                (username, hash_password(password), question,
+                 hash_password(_normalize_answer(answer))),
             )
             conn.commit()
             return True
         finally:
             cur.close()
-
 
 def login_user(username, password):
     with get_db() as conn:
@@ -119,7 +120,45 @@ def login_user(username, password):
     if not row:
         return False
     return check_password(password, row[0])
+def _normalize_answer(answer):
+    return (answer or "").strip().lower()
 
+
+def set_security_question(user_id, question, answer):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE users SET security_question = %s, security_answer = %s WHERE id = %s;",
+                (question, hash_password(_normalize_answer(answer)), user_id),
+            )
+            conn.commit()
+        finally:
+            cur.close()
+
+
+def get_security_question(username):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT security_question FROM users WHERE username = %s;", (username,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+    return row[0] if row else None
+
+
+def check_security_answer(username, answer):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT security_answer FROM users WHERE username = %s;", (username,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+    if not row or not row[0]:
+        return False
+    return check_password(_normalize_answer(answer), row[0])
 
 def get_user_id(username):
     with get_db() as conn:
@@ -205,14 +244,26 @@ def add_room_member(room_id, user_id):
             conn.commit()
         finally:
             cur.close()
-
+def remove_room_member(room_id, user_id):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM room_members WHERE room_id = %s AND user_id = %s;",
+                (room_id, user_id),
+            )
+            removed = cur.rowcount > 0
+            conn.commit()
+            return removed
+        finally:
+            cur.close()
 
 def get_room_history(room_id, limit=50):
     with get_db() as conn:
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT u.username, m.content, m.created_at "
+                "SELECT m.id, u.username, m.content, m.created_at "
                 "FROM messages m JOIN users u ON u.id = m.user_id "
                 "WHERE m.room_id = %s "
                 "ORDER BY m.created_at ASC "
@@ -222,17 +273,47 @@ def get_room_history(room_id, limit=50):
             return cur.fetchall()
         finally:
             cur.close()
-
-
+def delete_message_db(message_id, user_id):
+    """Delete a message only if it belongs to user_id.
+    Returns True if a row was actually deleted, False otherwise."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM messages WHERE id = %s AND user_id = %s;",
+                (message_id, user_id),
+            )
+            deleted = cur.rowcount > 0
+            conn.commit()
+            return deleted
+        finally:
+            cur.close()
+def edit_message_db(message_id, user_id, new_content):
+    """Update a message's content only if it belongs to user_id.
+    Returns True if a row was actually updated, False otherwise."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE messages SET content = %s WHERE id = %s AND user_id = %s;",
+                (new_content, message_id, user_id),
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+        finally:
+            cur.close()
 def save_message(user_id, room_id, content):
     with get_db() as conn:
         cur = conn.cursor()
         try:
             cur.execute(
-                "INSERT INTO messages (user_id, room_id, content) VALUES (%s, %s, %s);",
+                "INSERT INTO messages (user_id, room_id, content) VALUES (%s, %s, %s) RETURNING id;",
                 (user_id, room_id, content),
             )
+            message_id = cur.fetchone()[0]
             conn.commit()
+            return message_id
         finally:
             cur.close()
 
@@ -253,7 +334,19 @@ def list_user_rooms(user_id):
         finally:
             cur.close()
 
-
+def list_room_members(room_id):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT u.id, u.username FROM room_members rm "
+                "JOIN users u ON u.id = rm.user_id "
+                "WHERE rm.room_id = %s ORDER BY u.username;",
+                (room_id,),
+            )
+            return cur.fetchall()
+        finally:
+            cur.close()
 def dm_room_name(id_a, id_b):
     return f"dm_{min(id_a, id_b)}_{max(id_a, id_b)}"
 
@@ -451,13 +544,18 @@ def register():
     if len(password) < 6:
         return render_template("login.html", mode="register",
                                error="Password must be at least 6 characters.", username=username)
-    if not register_user(username, password):
+
+    question = (request.form.get("security_question") or "").strip()
+    answer = (request.form.get("security_answer") or "").strip()
+    if not question or not answer:
+        return render_template("login.html", mode="register",
+                               error="Please choose a security question and answer.", username=username)
+
+    if not register_user(username, password, question, answer):
         return render_template("login.html", mode="register",
                                error="That username is already taken.", username=username)
     return render_template("login.html", mode="login",
                            notice="Account created — please sign in.", username=username)
-
-
 @app.route("/login", methods=["POST"])
 @limiter.limit("10 per minute")
 def login():
@@ -593,9 +691,10 @@ def group_details(room_name):
         "photo": g["photo"],
         "is_private": g["is_private"],
         "is_owner": g["owner_id"] == user_id,
+        "owner_id": g["owner_id"],
         "invite_token": g["invite_token"] if g["is_private"] else None,
+        "members": [{"id": m[0], "username": m[1]} for m in list_room_members(room_id)],
     })
-
 @app.route("/room/<room_name>/delete", methods=["POST"])
 @limiter.limit("20 per minute")
 def delete_room(room_name):
@@ -720,8 +819,9 @@ def enter_room(sid, room_name):
     # currentRoom is set before those messages arrive.
     emit("active_room", room_name, to=sid)
 
-    for hist_user, hist_msg, hist_time in get_room_history(room_id):
+    for hist_id, hist_user, hist_msg, hist_time in get_room_history(room_id):
         emit("message", {
+            "id": hist_id,
             "sender": hist_user,
             "text": hist_msg,
             "time": hist_time.strftime("%H:%M") if hist_time else "",
@@ -835,16 +935,66 @@ def handle_message(msg):
         msg = msg[:2000]
     msg = str(escape(msg))  # XSS: neutralise <script>, HTML tags, etc. before save + broadcast
 
+    message_id = None
     if info["user_id"] is not None:
-        save_message(info["user_id"], info["room_id"], msg)
+        message_id = save_message(info["user_id"], info["room_id"], msg)
 
     emit("message", {
+        "id": message_id,
         "sender": info["username"],
         "text": msg,
         "time": datetime.now().strftime("%H:%M"),
         "room": info["room"],
     }, to=info["room"])
 
+@socketio.on("delete_message")
+def handle_delete_message(data):
+    info = users.get(request.sid)
+    if not info or not info["room"]:
+        return
+    data = data or {}
+    message_id = data.get("id")
+    if message_id is None:
+        return
+    if delete_message_db(message_id, info["user_id"]):
+        # Tell everyone in the room to drop it from their view.
+        socketio.emit("message_deleted", {"id": message_id}, to=info["room"])
+@socketio.on("edit_message")
+def handle_edit_message(data):
+    info = users.get(request.sid)
+    if not info or not info["room"]:
+        return
+    data = data or {}
+    message_id = data.get("id")
+    new_text = (data.get("text") or "").strip()
+    if message_id is None or not new_text:
+        return
+    if len(new_text) > 2000:
+        new_text = new_text[:2000]
+    new_text = str(escape(new_text))  # XSS: same neutralisation as a new message
+    if edit_message_db(message_id, info["user_id"], new_text):
+        socketio.emit("message_edited", {"id": message_id, "text": new_text}, to=info["room"])
+
+@socketio.on("leave_group")
+def handle_leave_group(data):
+    info = users.get(request.sid)
+    if not info:
+        return
+    data = data or {}
+    room_name = (data.get("room") or "").strip()
+    if not room_name or room_name.startswith("dm_"):
+        return  # DMs are deleted, not "left"
+    found = find_room(room_name)
+    if not found:
+        return
+    room_id, _is_private = found
+    user_id = info["user_id"]
+    if is_owner(room_id, user_id):
+        send("You own this group — delete it instead of leaving.", to=request.sid)
+        return
+    if remove_room_member(room_id, user_id):
+        leave_room(room_name)                       # stop receiving this room's messages
+        emit("left_group", {"name": room_name}, to=request.sid)
 @socketio.on("disconnect")
 def handle_disconnect():
     info = users.pop(request.sid, None)

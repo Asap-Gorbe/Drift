@@ -138,8 +138,10 @@
                 <button class="btn btn--ghost" id="gRegenerate" style="display:none;" onclick="regenerateLink()">Regenerate link</button>
 
                 <div class="modal__error" id="gError" style="display:none;"></div>
+                <div class="group-members" id="gMembers" style="display:none;"></div>
                 <button class="btn btn--primary" id="gSave" onclick="saveGroup()">Save changes</button>
                 <button class="btn btn--danger" id="gDelete" style="display:none;" onclick="deleteCurrentGroup()">Delete group</button>
+                <button class="btn btn--danger" id="gLeave" style="display:none;" onclick="leaveCurrentGroup()">Leave group</button>
             </div>
         </div>
     </div>
@@ -300,6 +302,13 @@ function updateHeaderActions() {
         closeGroupModal();
     }
 
+    function leaveCurrentGroup() {
+        if (!groupModalName) return;
+        if (!confirm("Leave this group? If it's private you'll need a new invite to rejoin.")) return;
+        socket.emit("leave_group", {room: groupModalName});
+        closeGroupModal();
+    }
+
     async function deleteCurrentDM() {
         if (!currentRoom) return;
         if (!confirm("Delete this conversation? This removes it for both of you.")) return;
@@ -307,6 +316,11 @@ function updateHeaderActions() {
     }
 
     socket.on("room_deleted", function (data) {
+        delete unread[data.name];
+        if (currentRoom === data.name) showEmptyState();
+        socket.emit("get_rooms");   // drop it from the sidebar
+    });
+    socket.on("left_group", function (data) {
         delete unread[data.name];
         if (currentRoom === data.name) showEmptyState();
         socket.emit("get_rooms");   // drop it from the sidebar
@@ -478,6 +492,7 @@ function updateHeaderActions() {
             }
 
             applyOwnerMode(g.is_owner);
+            renderMembers(g.members, g.owner_id);
             document.getElementById("gError").style.display = "none";
             document.getElementById("groupModal").style.display = "flex";
         } catch (e) { /* ignore */ }
@@ -492,8 +507,48 @@ function updateHeaderActions() {
         document.getElementById("gRegenerate").style.display = (isOwner && groupEditPrivate) ? "block" : "none";
         document.getElementById("groupModalTitle").textContent = isOwner ? "Edit group" : "Group info";
         document.getElementById("gDelete").style.display = isOwner ? "block" : "none";
+        document.getElementById("gLeave").style.display = isOwner ? "none" : "block";
     }
 
+    function renderMembers(members, ownerId) {
+        const box = document.getElementById("gMembers");
+        box.innerHTML = "";
+        if (!members || !members.length) { box.style.display = "none"; return; }
+
+        const title = document.createElement("div");
+        title.className = "group-members__title";
+        title.textContent = "Members (" + members.length + ")";
+        box.appendChild(title);
+
+        members.forEach(m => {
+            const row = document.createElement("div");
+            row.className = "group-members__row";
+
+            const avatar = avatarEl(m.username);
+            avatar.classList.add("group-members__avatar");
+            row.appendChild(avatar);
+
+            const text = document.createElement("div");
+            text.className = "group-members__text";
+
+            const name = document.createElement("span");
+            name.className = "group-members__name";
+            name.textContent = m.username;
+            text.appendChild(name);
+
+            if (m.id === ownerId) {
+                const sub = document.createElement("span");
+                sub.className = "group-members__sub";
+                sub.textContent = "owner";
+                text.appendChild(sub);
+            }
+
+            row.appendChild(text);
+            box.appendChild(row);
+        });
+
+        box.style.display = "block";
+    }
     function setGroupVisibility(btn) {
         if (btn.disabled) return;
         document.querySelectorAll("#gVisToggle .seg__btn").forEach(b => b.classList.remove("is-active"));
@@ -653,6 +708,7 @@ function updateHeaderActions() {
 
         const row = document.createElement("li");
         row.className = "message-row" + (own ? " message-row--own" : "");
+        if (data.id != null) row.dataset.messageId = data.id;
 
         const bubble = document.createElement("div");
         bubble.className = "message" + (own ? " message--own" : "");
@@ -672,13 +728,108 @@ function updateHeaderActions() {
         bubble.appendChild(s);
         bubble.appendChild(c);
         bubble.appendChild(t);
+        bubble.appendChild(s);
+        bubble.appendChild(c);
+        bubble.appendChild(t);
 
+        if (own && data.id != null) {
+            const actions = document.createElement("div");
+            actions.className = "message__actions";
+
+            const editBtn = document.createElement("button");
+            editBtn.type = "button";
+            editBtn.className = "message__action";
+            editBtn.textContent = "✎";
+            editBtn.title = "Edit message";
+            editBtn.onclick = function () { startEdit(bubble, c, data.id); };
+
+            const delBtn = document.createElement("button");
+            delBtn.type = "button";
+            delBtn.className = "message__action message__action--danger";
+            delBtn.textContent = "×";
+            delBtn.title = "Delete message";
+            delBtn.onclick = function () {
+                if (confirm("Delete this message?")) {
+                    socket.emit("delete_message", {id: data.id});
+                }
+            };
+
+            actions.appendChild(editBtn);
+            actions.appendChild(delBtn);
+            bubble.appendChild(actions);
+        }
         row.appendChild(avatarEl(data.sender));
         row.appendChild(bubble);
         messages.appendChild(row);
         messages.scrollTop = messages.scrollHeight;
     });
+    socket.on("message_deleted", function (data) {
+        const row = document.querySelector(
+            '.message-row[data-message-id="' + data.id + '"]'
+        );
+        if (row) row.remove();
+    });
+    socket.on("message_edited", function (data) {
+        const row = document.querySelector(
+            '.message-row[data-message-id="' + data.id + '"]'
+        );
+        if (!row) return;
+        const text = row.querySelector(".message__text");
+        if (text) text.textContent = data.text;
+    });
+    function startEdit(bubble, textSpan, id) {
+        if (bubble.querySelector(".message__edit")) return;  // already editing
 
+        const original = textSpan.textContent;
+
+        const box = document.createElement("div");
+        box.className = "message__edit";
+
+        const input = document.createElement("textarea");
+        input.className = "message__edit-input";
+        input.value = original;
+
+        const save = document.createElement("button");
+        save.type = "button";
+        save.className = "message__action";
+        save.textContent = "Save";
+
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "message__action";
+        cancel.textContent = "Cancel";
+
+        function close() {
+            box.remove();
+            textSpan.style.display = "";
+        }
+
+        save.onclick = function () {
+            const text = input.value.trim();
+            if (text && text !== original) {
+                socket.emit("edit_message", {id: id, text: text});
+            }
+            close();  // the message_edited broadcast rewrites the span text
+        };
+        cancel.onclick = close;
+
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); save.onclick(); }
+            if (e.key === "Escape") { e.preventDefault(); close(); }
+        });
+
+        const btnRow = document.createElement("div");
+        btnRow.className = "message__edit-buttons";
+        btnRow.appendChild(save);
+        btnRow.appendChild(cancel);
+
+        box.appendChild(input);
+        box.appendChild(btnRow);
+
+        textSpan.style.display = "none";
+        textSpan.parentNode.insertBefore(box, textSpan.nextSibling);
+        input.focus();
+    }
     function onEnter(id, fn) {
         document.getElementById(id).addEventListener("keydown", e => {
             if (e.key === "Enter") { e.preventDefault(); fn(); }

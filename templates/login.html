@@ -35,6 +35,20 @@
             <input id="password" name="password" type="password" placeholder="••••••••"
                    autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}" required>
 
+            <div id="securityFields" style="{{ 'display:none;' if mode != 'register' else '' }}">
+                <label class="auth__label" for="securityQuestion">Security question</label>
+                <select id="securityQuestion" name="security_question">
+                    <option value="What was your first pet's name?">What was your first pet's name?</option>
+                    <option value="What city were you born in?">What city were you born in?</option>
+                    <option value="What was the name of your first school?">What was the name of your first school?</option>
+                    <option value="What is your favorite movie?">What is your favorite movie?</option>
+                </select>
+
+                <label class="auth__label" for="securityAnswer">Answer</label>
+                <input id="securityAnswer" name="security_answer" placeholder="Your answer"
+                       autocomplete="off">
+            </div>
+
             <button class="btn btn--primary" type="submit" id="submitBtn">
                 {{ 'Create account' if mode == 'register' else 'Sign in' }}
             </button>
@@ -61,15 +75,22 @@
             document.getElementById("submitBtn").textContent = "Create account";
             document.getElementById("toggleBtn").textContent = "I already have an account";
             pw.setAttribute("autocomplete", "new-password");
+            document.getElementById("securityFields").style.display = "";
+            document.getElementById("securityAnswer").required = true;
         } else {
             mode = "login";
             form.action = "/login";
             document.getElementById("authTagline").textContent = "Sign in to keep drifting";
             document.getElementById("submitBtn").textContent = "Sign in";
             document.getElementById("toggleBtn").textContent = "Create an account";
+            document.getElementById("securityFields").style.display = "none";
+            document.getElementById("securityAnswer").required = false;
             pw.setAttribute("autocomplete", "current-password");
         }
     }
+
+    // Match the answer field's required state to the current mode on load.
+    document.getElementById("securityAnswer").required = (mode === "register");
 </script>
 </body>
 </html>
