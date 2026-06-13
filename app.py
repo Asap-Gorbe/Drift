@@ -1,4 +1,4 @@
-__version__ = "2.22"
+__version__ = "2.24"
 import logging
 import os
 from contextlib import contextmanager
