@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+{% set stage = stage|default('username') %}
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drift · Reset password</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..700&family=Hanken+Grotesk:wght@400..700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="auth">
+    <div class="auth__card">
+        <div class="auth__brand">Drift</div>
+        <div class="auth__tagline">
+            {{ 'Answer your security question' if stage == 'answer' else 'Reset your password' }}
+        </div>
+
+        {% if error %}
+            <div class="auth__alert auth__alert--error">{{ error }}</div>
+        {% endif %}
+
+        {% if stage == 'answer' %}
+        <form class="auth__form" method="post" action="/reset">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="stage" value="answer">
+            <input type="hidden" name="username" value="{{ username }}">
+
+            <div class="auth__label">Security question</div>
+            <div class="reset__question">{{ question }}</div>
+
+            <label class="auth__label" for="securityAnswer">Answer</label>
+            <input id="securityAnswer" name="security_answer" placeholder="Your answer"
+                   autocomplete="off" required>
+
+            <label class="auth__label" for="newPassword">New password</label>
+            <input id="newPassword" name="new_password" type="password" placeholder="••••••••"
+                   autocomplete="new-password" required>
+
+            <button class="btn btn--primary" type="submit">Reset password</button>
+        </form>
+        {% else %}
+        <form class="auth__form" method="post" action="/reset">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="stage" value="username">
+
+            <label class="auth__label" for="username">Username</label>
+            <input id="username" name="username" value="{{ username|default('') }}"
+                   placeholder="yourname" autocomplete="username" required>
+
+            <button class="btn btn--primary" type="submit">Continue</button>
+        </form>
+        {% endif %}
+
+        <div class="auth__divider"><span>or</span></div>
+
+        <a class="auth__link" href="{{ url_for('login_page') }}">Back to sign in</a>
+    </div>
+</div>
+</body>
+</html>
