@@ -88,7 +88,19 @@ def hash_password(password: str) -> str:
 def check_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-
+def update_password(username, new_password):
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE users SET password = %s WHERE username = %s;",
+                (hash_password(new_password), username),
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+        finally:
+            cur.close()
 # ---------- User helpers ----------
 
 def register_user(username, password, question, answer):
@@ -570,7 +582,48 @@ def login():
         return redirect(url_for("join_private", token=pending))
     return redirect(url_for("index"))
 
+@app.route("/reset", methods=["GET", "POST"])
+@limiter.limit("10 per minute")
+def reset():
+    if request.method == "GET":
+        return render_template("reset.html", stage="username")
 
+    stage = request.form.get("stage")
+    username = (request.form.get("username") or "").strip()
+
+    # Stage 1: look up the user's question.
+    if stage == "username":
+        if not username:
+            return render_template("reset.html", stage="username",
+                                   error="Please enter your username.")
+        question = get_security_question(username)
+        if not question:
+            return render_template("reset.html", stage="username",
+                                   error="No security question is set for that account.")
+        return render_template("reset.html", stage="answer",
+                               username=username, question=question)
+
+    # Stage 2: verify the answer and set the new password.
+    question = get_security_question(username)
+    if not question:
+        return render_template("reset.html", stage="username",
+                               error="Please start again.")
+
+    answer = request.form.get("security_answer") or ""
+    new_password = request.form.get("new_password") or ""
+
+    if len(new_password) < 6:
+        return render_template("reset.html", stage="answer", username=username,
+                               question=question,
+                               error="Password must be at least 6 characters.")
+    if not check_security_answer(username, answer):
+        return render_template("reset.html", stage="answer", username=username,
+                               question=question,
+                               error="That answer is incorrect.")
+
+    update_password(username, new_password)
+    return render_template("login.html", mode="login",
+                           notice="Password updated — please sign in.")
 @app.route("/login_page")
 def login_page():
     return render_template("login.html")

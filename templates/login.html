@@ -53,7 +53,7 @@
                 {{ 'Create account' if mode == 'register' else 'Sign in' }}
             </button>
         </form>
-
+        <a class="auth__link" href="{{ url_for('reset') }}">Forgot password?</a>
         <div class="auth__divider"><span>or</span></div>
 
         <button class="auth__toggle" type="button" id="toggleBtn" onclick="toggleMode()">

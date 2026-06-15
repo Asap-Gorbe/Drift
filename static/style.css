@@ -709,4 +709,8 @@ body {
 .group-members__name { font-size: 15px; font-weight: 600; }
 .group-members__sub { font-size: 12px; opacity: 0.6; }
 #securityFields { display: flex; flex-direction: column; gap: 10px; }
+
+.reset__question { font-size: 15px; padding: 2px 0 6px; }
+.auth__link { display: block; text-align: center; color: var(--text-faint); text-decoration: none; font-size: 14px; }
+.auth__link:hover { color: var(--text); }
 }
