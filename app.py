@@ -986,7 +986,6 @@ def handle_message(msg):
         return
     if len(msg) > 2000:
         msg = msg[:2000]
-    msg = str(escape(msg))  # XSS: neutralise <script>, HTML tags, etc. before save + broadcast
 
     message_id = None
     if info["user_id"] is not None:
@@ -1024,7 +1023,6 @@ def handle_edit_message(data):
         return
     if len(new_text) > 2000:
         new_text = new_text[:2000]
-    new_text = str(escape(new_text))  # XSS: same neutralisation as a new message
     if edit_message_db(message_id, info["user_id"], new_text):
         socketio.emit("message_edited", {"id": message_id, "text": new_text}, to=info["room"])
 
