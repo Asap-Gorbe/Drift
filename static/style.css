@@ -413,6 +413,21 @@ body {
     align-self: flex-end;
 }
 
+/* ---------- Grouped (consecutive same-sender) messages ---------- */
+.message-row--grouped {
+    margin-top: -6px;                /* tighten the 10px gap down to ~4px */
+}
+.message-row--grouped .msg-avatar {
+    visibility: hidden;              /* keep the slot so bubbles stay aligned */
+}
+.message-row--grouped .message__sender {
+    display: none;                   /* name only on the first of a run */
+}
+/* Timestamp only on the last message of a run (mid-run rows hide it). */
+.message-row--run-mid .message__time {
+    display: none;
+}
+
 .msg-avatar {
     width: 30px; height: 30px;
     border-radius: 50%;
@@ -433,7 +448,8 @@ body {
     display: flex;
     flex-direction: column;
     padding: 8px 13px;
-    border-radius: 12px;
+    /* Asymmetric: sharper corner on the avatar/tail side (bottom-left for others). */
+    border-radius: 14px 14px 14px 4px;
     background: var(--panel);
     border: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
@@ -442,6 +458,8 @@ body {
 .message--own {
     background: var(--accent);
     border-color: var(--accent);
+    /* Own bubbles sit on the right; tail/avatar is bottom-right. */
+    border-radius: 14px 14px 4px 14px;
 }
 
 .message__sender {

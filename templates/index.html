@@ -158,6 +158,9 @@
     let avatars = {};   // username -> stored filename
     let unread = {};    // room name -> unread count
     let groupModalName = null;
+    // Message grouping: collapse consecutive messages from the same sender.
+    let lastRenderedSender = null;   // sender of the previous rendered bubble
+    let lastRenderedRow = null;      // its row, so we can mark it mid-run
     let groupEditPrivate = false;
     let groupIsOwner = false;
 
@@ -671,7 +674,11 @@ function updateHeaderActions() {
     }
 
     function setRoomLabel(text) { document.getElementById("currentRoom").textContent = text; }
-    function clearMessages() { document.getElementById("messages").innerHTML = ""; }
+    function clearMessages() {
+        document.getElementById("messages").innerHTML = "";
+        lastRenderedSender = null;   // start a fresh grouping run
+        lastRenderedRow = null;
+    }
     function toggleSidebar() { document.querySelector(".app").classList.toggle("sidebar-open"); }
     function closeSidebar() { document.querySelector(".app").classList.remove("sidebar-open"); }
 
@@ -693,6 +700,8 @@ function updateHeaderActions() {
             li.textContent = data;
             messages.appendChild(li);
             messages.scrollTop = messages.scrollHeight;
+            lastRenderedSender = null;   // a notice breaks the grouping run
+            lastRenderedRow = null;
             return;
         }
 
@@ -705,10 +714,16 @@ function updateHeaderActions() {
 
         // Otherwise it's the open room — render the bubble.
         const own = data.sender === CURRENT_USER;
+        const grouped = data.sender === lastRenderedSender;
 
         const row = document.createElement("li");
-        row.className = "message-row" + (own ? " message-row--own" : "");
+        row.className = "message-row"
+            + (own ? " message-row--own" : "")
+            + (grouped ? " message-row--grouped" : "");
         if (data.id != null) row.dataset.messageId = data.id;
+        // This new row is now the last of its run; the one before it (if from the
+        // same sender) becomes mid-run, so hide its timestamp.
+        if (grouped && lastRenderedRow) lastRenderedRow.classList.add("message-row--run-mid");
 
         const bubble = document.createElement("div");
         bubble.className = "message" + (own ? " message--own" : "");
@@ -762,6 +777,8 @@ function updateHeaderActions() {
         row.appendChild(bubble);
         messages.appendChild(row);
         messages.scrollTop = messages.scrollHeight;
+        lastRenderedSender = data.sender;
+        lastRenderedRow = row;
     });
     socket.on("message_deleted", function (data) {
         const row = document.querySelector(
