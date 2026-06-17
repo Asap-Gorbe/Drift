@@ -10,6 +10,10 @@
     --accent: #7c83ff;
     --accent-hover: #8f95ff;
     --accent-soft: rgba(124, 131, 255, 0.14);
+    /* Elevation — layered low-opacity black, tuned for the dark UI */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30);
+    --shadow-md: 0 2px 5px rgba(0, 0, 0, 0.28), 0 6px 16px rgba(0, 0, 0, 0.32);
+    --shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.34), 0 16px 40px rgba(0, 0, 0, 0.46);
     --font-display: 'Bricolage Grotesque', sans-serif;
     --font-body: 'Hanken Grotesk', sans-serif;
 }
@@ -241,6 +245,7 @@ body {
     background: var(--bg-sidebar);
     border: 1px solid var(--border);
     border-radius: 16px;
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
 }
 .modal__header {
@@ -431,6 +436,7 @@ body {
     border-radius: 12px;
     background: var(--panel);
     border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
     min-width: 0;
 }
 .message--own {
@@ -473,6 +479,7 @@ body {
     border-radius: 12px;
     font-size: 14px;
     font-family: var(--font-body);
+    box-shadow: var(--shadow-sm);
     transition: border-color .15s;
 }
 .composer input::placeholder { color: var(--text-faint); }
@@ -487,6 +494,7 @@ body {
     font-size: 14px;
     cursor: pointer;
     font-family: var(--font-body);
+    box-shadow: var(--shadow-sm);
     transition: .15s;
 }
 .composer button:hover { background: var(--accent-hover); }
