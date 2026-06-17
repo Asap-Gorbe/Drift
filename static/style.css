@@ -121,7 +121,7 @@ body {
     font-size: 13.5px;
     color: var(--text-dim);
     cursor: pointer;
-    transition: background .15s, color .15s;
+    transition: background .15s, color .15s, transform .15s, box-shadow .15s;
 }
 .room-list__name {
     flex: 1;
@@ -147,7 +147,7 @@ body {
 
 }
 
-.room-list__item:hover { background: var(--panel); color: var(--text); }
+.room-list__item:hover { background: var(--panel); color: var(--text); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .room-list__item.is-active {
     background: var(--accent-soft);
     color: var(--accent);
@@ -430,7 +430,8 @@ body {
     gap: 8px;
     max-width: 75%;
     align-self: flex-start;          /* other people → left */
-    animation: msgIn .18s ease-out;
+    /* Springy entrance: the back-out curve overshoots, then settles. */
+    animation: msgIn .26s cubic-bezier(.34, 1.56, .64, 1);
 }
 .message-row--own {
     flex-direction: row-reverse;     /* you → right, avatar on the right */
@@ -540,11 +541,24 @@ body {
     transition: .15s;
 }
 .composer button:hover { background: var(--accent-hover); }
-.composer button:active { transform: translateY(1px); }
+
+/* Tactile press feedback on the primary action buttons */
+.composer button:active,
+.btn:active,
+.field button:active { transform: scale(.97); }
 
 @keyframes msgIn {
-    from { opacity: 0; transform: translateY(4px); }
+    from { opacity: 0; transform: translateY(8px) scale(.98); }
     to { opacity: 1; transform: none; }
+}
+
+/* Respect users who prefer reduced motion: keep state changes, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+    .message-row { animation: none; }
+    .room-list__item:hover { transform: none; }
+    .composer button:active,
+    .btn:active,
+    .field button:active { transform: none; }
 }
 
 /* ---------- Auth / login ---------- */
