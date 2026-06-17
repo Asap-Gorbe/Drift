@@ -55,7 +55,11 @@
     <main class="chat">
         <header class="chat__header">
             <button class="menu-btn" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
-            <span id="currentRoom" class="chat__title" onclick="openGroupPanel()"></span>
+            <div class="chat-header__avatar" id="chatHeaderAvatar"></div>
+            <div class="chat-header__meta" onclick="openGroupPanel()">
+                <span id="currentRoom" class="chat__title"></span>
+                <span id="chatHeaderSub" class="chat-header__sub"></span>
+            </div>
             <button class="header-action" id="deleteChatBtn" style="display:none;" onclick="deleteCurrentDM()" title="Delete chat">🗑</button>
         </header>
 
@@ -161,6 +165,7 @@
     // Message grouping: collapse consecutive messages from the same sender.
     let lastRenderedSender = null;   // sender of the previous rendered bubble
     let lastRenderedRow = null;      // its row, so we can mark it mid-run
+    let roomsByName = {};            // name -> room entry, for the header avatar/subtitle
     let groupEditPrivate = false;
     let groupIsOwner = false;
 
@@ -185,7 +190,9 @@
     socket.on("room_list", function (rooms) {
         const list = document.getElementById("room-list");
         list.innerHTML = "";
+        roomsByName = {};
         rooms.forEach(room => {
+            roomsByName[room.name] = room;
             const isDM = room.name.startsWith("dm_");
             const label = room.display || room.name;   // DM -> the other user's name
             const display = (!isDM && room.is_private ? "🔒 " : "") + label;
@@ -215,6 +222,7 @@
             li.onclick = () => goToRoom(room.name, display);
             list.appendChild(li);
         });
+        renderActiveHeader();   // fresh data may change the active room's avatar/subtitle
     });
 
     socket.on("active_room", function (room) {
@@ -222,6 +230,7 @@
         unread[room] = 0;     // opening a room clears its unread count
         renderUnread();
         updateHeaderActions();
+        renderActiveHeader();
     });
 
     socket.on("group_updated", function (data) {
@@ -287,6 +296,7 @@ function updateHeaderActions() {
         currentRoom = null;
         setRoomLabel("");
         updateHeaderActions();
+        renderActiveHeader();
     }
     async function deleteRoom(name) {
         try {
@@ -674,6 +684,27 @@ function updateHeaderActions() {
     }
 
     function setRoomLabel(text) { document.getElementById("currentRoom").textContent = text; }
+
+    // Populate the header's avatar + subtitle for the active conversation.
+    function renderActiveHeader() {
+        const slot = document.getElementById("chatHeaderAvatar");
+        const sub = document.getElementById("chatHeaderSub");
+        slot.innerHTML = "";
+        sub.textContent = "";
+        if (!currentRoom) { slot.style.display = "none"; return; }
+        const room = roomsByName[currentRoom];
+        if (!room) { slot.style.display = "none"; return; }  // e.g. a brand-new DM not yet in the list
+        slot.style.display = "";
+        const label = room.display || room.name;
+        const avatar = roomAvatarEl(room, label);
+        slot.appendChild(avatar);
+        if (currentRoom.startsWith("dm_")) {
+            sub.textContent = "online";
+        } else {
+            const n = room.member_count || 0;
+            sub.textContent = n + (n === 1 ? " member" : " members");
+        }
+    }
     function clearMessages() {
         document.getElementById("messages").innerHTML = "";
         lastRenderedSender = null;   // start a fresh grouping run

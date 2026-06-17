@@ -335,7 +335,9 @@ def list_user_rooms(user_id):
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT r.id, r.name, r.is_private, r.photo "
+                "SELECT r.id, r.name, r.is_private, r.photo, "
+                "       (SELECT COUNT(*) FROM room_members rm2 "
+                "        WHERE rm2.room_id = r.id) AS member_count "
                 "FROM rooms r "
                 "JOIN room_members rm ON rm.room_id = r.id "
                 "WHERE rm.user_id = %s "
@@ -902,7 +904,7 @@ def handle_join(data=None):
     # Stay subscribed to every conversation the user is in, so messages from
     # rooms they aren't currently viewing still reach the browser.
     if user_id is not None:
-        for _id, room_name, _priv, _photo in list_user_rooms(user_id):
+        for _id, room_name, _priv, _photo, _mc in list_user_rooms(user_id):
             join_room(room_name)
 
 @socketio.on("get_avatars")
@@ -936,8 +938,9 @@ def handle_get_rooms():
         return
 
     payload = []
-    for room_id, name, is_private, photo in list_user_rooms(user_id):
-        entry = {"id": room_id, "name": name, "is_private": is_private, "photo": photo}
+    for room_id, name, is_private, photo, member_count in list_user_rooms(user_id):
+        entry = {"id": room_id, "name": name, "is_private": is_private,
+                 "photo": photo, "member_count": member_count}
         # For DM rooms (dm_<a>_<b>), show the *other* person's name.
         if name.startswith("dm_"):
             try:

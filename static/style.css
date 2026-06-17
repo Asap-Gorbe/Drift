@@ -353,14 +353,38 @@ body {
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
+    gap: 11px;
     padding: 0 24px;
     font-family: var(--font-display);
     font-weight: 600;
     font-size: 16px;
     position: relative;
     z-index: 2;
+    /* Frosted glass: translucent surface + blur of whatever sits behind. */
+    background: rgba(28, 31, 38, 0.72);   /* var(--bg-chat) @ ~72% */
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    backdrop-filter: blur(14px) saturate(140%);
 }
 .app:not(.chat-active) .chat__header { border-bottom: none; }
+
+/* Active-conversation identity in the header */
+.chat-header__avatar { display: flex; flex-shrink: 0; }
+.chat-header__avatar .msg-avatar { width: 38px; height: 38px; }
+.chat-header__avatar .msg-avatar--initial { font-size: 15px; }
+.chat-header__meta {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    line-height: 1.2;
+    cursor: pointer;
+}
+.chat-header__sub {
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--text-dim);
+}
 
 .messages {
     flex: 1;
