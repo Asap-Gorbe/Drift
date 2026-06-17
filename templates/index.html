@@ -64,8 +64,24 @@
         </header>
 
         <div class="empty-state" id="emptyState">
-            <img src="{{ url_for('static', filename='bloommoon.jpeg') }}" alt="" class="empty-state__img">
-            <p class="empty-state__text">Please select a conversation to start drifting</p>
+            <svg class="empty-illustration" viewBox="0 0 200 170" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <defs>
+                    <filter id="eiGlow" x="-50%" y="-50%" width="200%" height="200%">
+                        <feGaussianBlur stdDeviation="16"/>
+                    </filter>
+                </defs>
+                <ellipse class="empty-illustration__glow" cx="112" cy="92" rx="72" ry="58" filter="url(#eiGlow)"/>
+                <rect class="empty-illustration__bubble-back" x="40" y="32" width="88" height="50" rx="16"/>
+                <path class="empty-illustration__tail" d="M82 118 L82 140 L106 121 Z"/>
+                <rect class="empty-illustration__bubble" x="62" y="64" width="104" height="58" rx="18"/>
+                <circle class="empty-illustration__dot" cx="96"  cy="93" r="5.5"/>
+                <circle class="empty-illustration__dot" cx="116" cy="93" r="5.5"/>
+                <circle class="empty-illustration__dot" cx="136" cy="93" r="5.5"/>
+            </svg>
+            <div class="empty-state__copy">
+                <p class="empty-state__text">No conversation open</p>
+                <p class="empty-state__hint">Pick a chat from the left to start drifting</p>
+            </div>
         </div>
 
         <ul class="messages" id="messages" style="display:none;"></ul>

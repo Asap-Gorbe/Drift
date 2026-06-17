@@ -409,18 +409,26 @@ body {
     padding: 24px;
     text-align: center;
 }
-.empty-state__img {
-    width: 260px;
-    max-width: 70%;
-    border-radius: 16px;
-    border: 1px solid var(--border);
-    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.4);
+.empty-illustration {
+    width: 200px;
+    max-width: 56%;
+    height: auto;
 }
+.empty-illustration__glow { fill: var(--accent); opacity: 0.16; }
+.empty-illustration__bubble-back { fill: var(--accent); opacity: 0.22; }
+.empty-illustration__bubble,
+.empty-illustration__tail { fill: var(--accent); }
+.empty-illustration__dot { fill: #fff; opacity: 0.92; }
+.empty-state__copy { display: flex; flex-direction: column; gap: 4px; }
 .empty-state__text {
-    color: var(--text-dim);
+    color: var(--text);
     font-family: var(--font-display);
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 600;
+}
+.empty-state__hint {
+    color: var(--text-faint);
+    font-size: 13.5px;
 }
 
 /* ---------- Messages with avatars ---------- */
