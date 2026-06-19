@@ -254,6 +254,7 @@
         roomsByName = {};
         rooms.forEach(room => {
             roomsByName[room.name] = room;
+            unread[room.name] = (room.name === currentRoom) ? 0 : (room.unread || 0);
             const isDM = room.name.startsWith("dm_");
             const label = room.display || room.name;   // DM -> the other user's name
             const display = (!isDM && room.is_private ? "🔒 " : "") + label;
