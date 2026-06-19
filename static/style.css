@@ -779,7 +779,7 @@ body {
     .messages { padding: 16px; }
     .composer { padding: 12px 16px 18px; }
     .chat__header { padding: 0 16px; }
-
+}
 .group-members { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .group-members__title { font-size: 13px; opacity: 0.7; margin-bottom: 4px; }
 .group-members__row { display: flex; align-items: center; gap: 12px; padding: 4px 0; }
@@ -792,4 +792,7 @@ body {
 .reset__question { font-size: 15px; padding: 2px 0 6px; }
 .auth__link { display: block; text-align: center; color: var(--text-faint); text-decoration: none; font-size: 14px; }
 .auth__link:hover { color: var(--text); }
-}
+.settings__heading { margin: 4px 0 10px; font-size: 0.95rem; font-weight: 600; }
+.settings__divider { height: 1px; background: rgba(0,0,0,0.1); margin: 20px 0; }
+.settings__note    { font-size: 0.85rem; opacity: 0.75; margin-bottom: 10px; line-height: 1.4; }
+.settings__ok      { color: #16a34a; font-size: 0.85rem; margin-top: 8px; }

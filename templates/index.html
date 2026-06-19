@@ -48,8 +48,7 @@
                 </label>
                 <span>{{ username }}</span>
             </form>
-            <a class="logout" href="/logout">Logout</a>
-        </div>
+            <a class="logout" href="#" onclick="openSettings(); return false;">Settings</a>        </div>
     </aside>
 
     <main class="chat">
@@ -166,7 +165,40 @@
         </div>
     </div>
 </div>
+<div class="modal" id="settingsModal" style="display:none;">
+        <div class="modal__card">
+            <div class="modal__header">
+                <span>Settings</span>
+                <button class="modal__close" onclick="closeSettings()" aria-label="Close">×</button>
+            </div>
+            <div class="modal__body">
+                <h4 class="settings__heading">Change password</h4>
+                <input id="setCurrentPw" class="modal__input" type="password" placeholder="Current password" autocomplete="current-password">
+                <input id="setNewPw" class="modal__input" type="password" placeholder="New password" autocomplete="new-password">
+                <button class="btn btn--primary" onclick="savePassword()">Update password</button>
+                <div class="modal__error" id="pwError" style="display:none;"></div>
+                <div class="settings__ok" id="pwOk" style="display:none;">Password updated ✓</div>
 
+                <div class="settings__divider"></div>
+
+                <h4 class="settings__heading">Security question</h4>
+                <div class="settings__note">
+                    {% if security_question %}Current: “{{ security_question }}”. Set a new one below to change it.
+                    {% else %}You haven't set one yet — add it so you can recover your account if you forget your password.{% endif %}
+                </div>
+                <select id="setSecQuestion" class="modal__input">
+                    <option value="What was your first pet's name?">What was your first pet's name?</option>
+                    <option value="What city were you born in?">What city were you born in?</option>
+                    <option value="What was the name of your first school?">What was the name of your first school?</option>
+                    <option value="What is your favorite movie?">What is your favorite movie?</option>
+                </select>
+                <input id="setSecAnswer" class="modal__input" placeholder="Answer" autocomplete="off">
+                <button class="btn btn--primary" onclick="saveSecurity()">Save security question</button>
+                <div class="modal__error" id="secError" style="display:none;"></div>
+                <div class="settings__ok" id="secOk" style="display:none;">Security question saved ✓</div>
+            </div>
+        </div>
+    </div>
 <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
 <script>
     const socket = io();
@@ -184,7 +216,20 @@
     let roomsByName = {};            // name -> room entry, for the header avatar/subtitle
     let groupEditPrivate = false;
     let groupIsOwner = false;
+    // --- Presence ---
+    const onlineUsers = new Set();
 
+    socket.on("presence_init", (data) => {
+        onlineUsers.clear();
+        (data.users || []).forEach(u => onlineUsers.add(u));
+        renderActiveHeader();
+    });
+
+    socket.on("presence", (data) => {
+        if (data.online) onlineUsers.add(data.user);
+        else onlineUsers.delete(data.user);
+        renderActiveHeader();
+    });
     socket.on("connect", () => {
         socket.emit("join");
         socket.emit("get_rooms");
@@ -656,7 +701,58 @@ function updateHeaderActions() {
     }
 
     function closeGroupModal() { document.getElementById("groupModal").style.display = "none"; }
+// --- Settings (modal) ---
+    function openSettings() {
+        ["pwError","pwOk","secError","secOk"].forEach(id => document.getElementById(id).style.display = "none");
+        ["setCurrentPw","setNewPw","setSecAnswer"].forEach(id => document.getElementById(id).value = "");
+        document.getElementById("settingsModal").style.display = "flex";
+    }
+    function closeSettings() { document.getElementById("settingsModal").style.display = "none"; }
 
+    async function savePassword() {
+        const err = document.getElementById("pwError"), ok = document.getElementById("pwOk");
+        err.style.display = "none"; ok.style.display = "none";
+        try {
+            const res = await fetch("/settings/password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+                body: JSON.stringify({
+                    current_password: document.getElementById("setCurrentPw").value,
+                    new_password: document.getElementById("setNewPw").value,
+                }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                ok.style.display = "block";
+                document.getElementById("setCurrentPw").value = "";
+                document.getElementById("setNewPw").value = "";
+            } else {
+                err.textContent = data.error || "Something went wrong."; err.style.display = "block";
+            }
+        } catch (e) { err.textContent = "Network error."; err.style.display = "block"; }
+    }
+
+    async function saveSecurity() {
+        const err = document.getElementById("secError"), ok = document.getElementById("secOk");
+        err.style.display = "none"; ok.style.display = "none";
+        try {
+            const res = await fetch("/settings/security", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+                body: JSON.stringify({
+                    security_question: document.getElementById("setSecQuestion").value,
+                    security_answer: document.getElementById("setSecAnswer").value,
+                }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                ok.style.display = "block";
+                document.getElementById("setSecAnswer").value = "";
+            } else {
+                err.textContent = data.error || "Something went wrong."; err.style.display = "block";
+            }
+        } catch (e) { err.textContent = "Network error."; err.style.display = "block"; }
+    }
     // --- Avatars ---
     function colorFor(str) {
         let h = 0;
@@ -715,7 +811,7 @@ function updateHeaderActions() {
         const avatar = roomAvatarEl(room, label);
         slot.appendChild(avatar);
         if (currentRoom.startsWith("dm_")) {
-            sub.textContent = "online";
+            sub.textContent = onlineUsers.has(room.display) ? "online" : "offline";
         } else {
             const n = room.member_count || 0;
             sub.textContent = n + (n === 1 ? " member" : " members");

@@ -646,6 +646,7 @@ def index():
         username=session["username"],
         initial_room=request.args.get("room", ""),
         avatar=get_avatar(session["username"]),
+        security_question=get_security_question(session["username"]),  # ← ADD THIS
     )
 
 
@@ -696,6 +697,37 @@ def upload_avatar():
 
     socketio.emit("avatars", all_avatars())
     return redirect(url_for("index"))
+@app.route("/settings/password", methods=["POST"])
+@limiter.limit("5 per minute")
+def settings_password():
+    if "username" not in session:
+        return jsonify(error="Not logged in."), 401
+    data = request.get_json(silent=True) or {}
+    current = data.get("current_password") or ""
+    new = (data.get("new_password") or "").strip()
+    if len(new) < 6:
+        return jsonify(error="New password must be at least 6 characters."), 400
+    if not login_user(session["username"], current):
+        return jsonify(error="Current password is incorrect."), 400
+    update_password(session["username"], new)
+    return jsonify(ok=True)
+
+
+@app.route("/settings/security", methods=["POST"])
+@limiter.limit("5 per minute")
+def settings_security():
+    if "username" not in session:
+        return jsonify(error="Not logged in."), 401
+    data = request.get_json(silent=True) or {}
+    question = (data.get("security_question") or "").strip()
+    answer = (data.get("security_answer") or "").strip()
+    if not question or not answer:
+        return jsonify(error="Pick a question and enter an answer."), 400
+    user_id = get_user_id(session["username"])
+    if user_id is None:
+        return jsonify(error="Account not found."), 400
+    set_security_question(user_id, question, answer)
+    return jsonify(ok=True)
 @app.route("/create_group", methods=["POST"])
 @limiter.limit("10 per minute")
 def create_group_route():
@@ -906,7 +938,8 @@ def handle_join(data=None):
     if user_id is not None:
         for _id, room_name, _priv, _photo, _mc in list_user_rooms(user_id):
             join_room(room_name)
-
+            emit ("presence_init" , {"users" : sorted({u["username"] for u in users.values()})})
+            socketio.emit("presence",{"user": username , "online": True})
 @socketio.on("get_avatars")
 def handle_get_avatars():
     emit("avatars", all_avatars())
@@ -1052,11 +1085,15 @@ def handle_leave_group(data):
 @socketio.on("disconnect")
 def handle_disconnect():
     info = users.pop(request.sid, None)
-    if not info or not info["room"]:
+    if not info:
         return
-    leave_room(info["room"])
-    send(f"{info['username']} left {info['room']}", to=info["room"])
-
+    username = info["username"]
+    # Offline only when the user's last socket is gone (covers multiple tabs).
+    if not any(u["username"] == username for u in users.values()):
+        socketio.emit("presence", {"user": username, "online": False})
+    if info["room"]:
+        leave_room(info["room"])
+        send(f"{info['username']} left {info['room']}", to=info["room"])
 
 @socketio.on("search")
 def handle_search(query):
