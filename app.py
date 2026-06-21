@@ -328,7 +328,40 @@ def save_message(user_id, room_id, content):
             return message_id
         finally:
             cur.close()
+def unread_counts(user_id):
+    """{room_id: count} of messages from others newer than the user's last-read marker."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT m.room_id, COUNT(*) "
+                "FROM messages m "
+                "JOIN room_members rm ON rm.room_id = m.room_id AND rm.user_id = %s "
+                "LEFT JOIN room_reads rr ON rr.user_id = %s AND rr.room_id = m.room_id "
+                "WHERE m.user_id <> %s AND m.id > COALESCE(rr.last_read_message_id, 0) "
+                "GROUP BY m.room_id;",
+                (user_id, user_id, user_id),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+        finally:
+            cur.close()
 
+
+def mark_room_read(user_id, room_id):
+    """Advance the user's last-read marker for a room to its newest message."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO room_reads (user_id, room_id, last_read_message_id) "
+                "VALUES (%s, %s, COALESCE((SELECT MAX(id) FROM messages WHERE room_id = %s), 0)) "
+                "ON CONFLICT (user_id, room_id) "
+                "DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id;",
+                (user_id, room_id, room_id),
+            )
+            conn.commit()
+        finally:
+            cur.close()
 
 def list_user_rooms(user_id):
     with get_db() as conn:
@@ -888,7 +921,6 @@ def enter_room(sid, room_name):
     info = users.get(sid)
     if not info:
         return
-
     room_id = get_room_id(room_name)
 
     # Only announce the first real join, not every view-switch between rooms.
@@ -960,7 +992,8 @@ def handle_switch_room(room_name):
             send("That's a private room — you need an invite link to join.", to=request.sid)
             return
     enter_room(request.sid, room_name)
-
+    if room:
+        mark_room_read(user_id, room[0])  # ← ADD: opening a room clears its unread
 
 @socketio.on("get_rooms")
 def handle_get_rooms():
@@ -969,11 +1002,12 @@ def handle_get_rooms():
     user_id = get_user_id(session["username"])
     if user_id is None:
         return
-
+    counts = unread_counts(user_id)          # ← ADD
     payload = []
     for room_id, name, is_private, photo, member_count in list_user_rooms(user_id):
         entry = {"id": room_id, "name": name, "is_private": is_private,
-                 "photo": photo, "member_count": member_count}
+                 "photo": photo, "member_count": member_count,
+                 "unread" : counts.get(room_id, 0) }
         # For DM rooms (dm_<a>_<b>), show the *other* person's name.
         if name.startswith("dm_"):
             try:
@@ -1034,7 +1068,11 @@ def handle_message(msg):
         "time": datetime.now().strftime("%H:%M"),
         "room": info["room"],
     }, to=info["room"])
-
+    # Anyone currently viewing this room has read the new message.
+    if message_id is not None:
+        for other in list(users.values()):
+            if other["room"] == info["room"] and other["user_id"] is not None:
+                mark_room_read(other["user_id"], info["room_id"])
 @socketio.on("delete_message")
 def handle_delete_message(data):
     info = users.get(request.sid)
