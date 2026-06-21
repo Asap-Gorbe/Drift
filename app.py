@@ -1022,6 +1022,29 @@ def handle_get_rooms():
     emit("room_list", payload)
 
 
+def _push_room_list(user_id):
+    """Build and emit a fresh room_list to every active socket belonging to user_id."""
+    counts = unread_counts(user_id)
+    payload = []
+    for room_id, name, is_private, photo, member_count in list_user_rooms(user_id):
+        entry = {"id": room_id, "name": name, "is_private": is_private,
+                 "photo": photo, "member_count": member_count,
+                 "unread": counts.get(room_id, 0)}
+        if name.startswith("dm_"):
+            try:
+                _, a, b = name.split("_")
+                other_id = int(b) if int(a) == user_id else int(a)
+                other_name = get_username(other_id)
+                if other_name:
+                    entry["display"] = other_name
+            except (ValueError, IndexError):
+                pass
+        payload.append(entry)
+    for sid, info in list(users.items()):
+        if info["user_id"] == user_id:
+            socketio.emit("room_list", payload, to=sid)
+
+
 @socketio.on("start_dm")
 def handle_start_dm(target_username):
     if request.sid not in users:
@@ -1044,6 +1067,15 @@ def handle_start_dm(target_username):
     add_room_member(room_id, my_id)
     add_room_member(room_id, target_id)
     enter_room(request.sid, dm_name)
+
+    # Subscribe any active sockets of the target user to the new DM socket room
+    # so incoming messages reach them immediately without a page refresh.
+    for sid, info in list(users.items()):
+        if info["user_id"] == target_id:
+            join_room(dm_name, sid=sid)
+
+    # Push an updated sidebar to the target so the DM appears right away.
+    _push_room_list(target_id)
 
 
 @socketio.on("message")
